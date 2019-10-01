@@ -8,34 +8,12 @@ impl Timeseries for u8 {
     }
 }
 
-fn trunc_days_utc(t: time::Tm) -> time::Tm {
-    let tu = t.to_utc();
-    let mut res = time::empty_tm();
-    res.tm_year = tu.tm_year;
-    res.tm_mon =  tu.tm_mon;
-    res.tm_mday = tu.tm_mday;
-    res.tm_yday = tu.tm_yday;
-    res.tm_wday = tu.tm_wday;
-    res
-}
-
-fn trunc_hours_utc(t: time::Tm) -> time::Tm {
-    let tu = t.to_utc();
-    let mut res = time::empty_tm();
-    res.tm_year = tu.tm_year;
-    res.tm_mon =  tu.tm_mon;
-    res.tm_mday = tu.tm_mday;
-    res.tm_yday = tu.tm_yday;
-    res.tm_wday = tu.tm_wday;
-    res.tm_hour = tu.tm_hour;
-    res
-}
-
 use itertools::Itertools; // tuple_windows
+use chrono::Timelike;
 
 pub fn forecast_iterator<MR, TS, TSI, MRI, MRIF, TSIF>(
-    start_time: time::Tm, target_time: time::Tm, mri: MRIF, tsi: TSIF
-) -> impl Iterator<Item=(time::Tm, MR, time::Tm, TS, time::Tm, TS)>
+    start_time: chrono::DateTime<chrono::Utc>, target_time: chrono::DateTime<chrono::Utc>, mri: MRIF, tsi: TSIF
+) -> impl Iterator<Item=(chrono::DateTime<chrono::Utc>, MR, chrono::DateTime<chrono::Utc>, TS, chrono::DateTime<chrono::Utc>, TS)>
 where
     MR: Timeseries + Clone,
     TS: Timeseries + Clone,
@@ -44,13 +22,12 @@ where
     MRIF: Fn() -> MRI,
     TSIF: Fn(MR) -> TSI,
 {
-
-    let start_time_d = trunc_days_utc(start_time); // trunc to days
-    let start_time_h = trunc_hours_utc(start_time); // trunc to hours
+    let start_time_d = start_time.date().and_hms(0, 0, 0); // trunc to days
+    let start_time_h = start_time.date().and_hms(start_time.hour(), 0, 0); // trunc to hours
 
     (0..)
         .flat_map(move |day| mri().map(
-            move |hh| (start_time_d + time::Duration::hours(day * 24 + hh.to_u8() as i64), hh)
+            move |hh| (start_time_d + chrono::Duration::hours(day * 24 + hh.to_u8() as i64), hh)
         ))
         .tuple_windows::<(_, _)>()
         .skip_while(move |(_, t)| t.0 <= start_time_h)
@@ -58,7 +35,7 @@ where
         .take_while(move |(hhtime, _)| target_time >= *hhtime)
         .map(move |(hhtime, hh)| {
             let opt = tsi(hh.clone())
-             .map(|ts| (hhtime + time::Duration::hours(ts.to_u8() as i64), ts))
+             .map(|ts| (hhtime + chrono::Duration::hours(ts.to_u8() as i64), ts))
              .tuple_windows::<(_, _)>()
              .take_while(|(f, _)| target_time >= f.0)
              .skip_while(|(_, t)| target_time >= t.0)
@@ -171,10 +148,10 @@ fn fetch_value(
     log: Arc<TaggedLog>,
     param: Parameter,
     lat: f32, lon: f32,
-    modelrun_time: time::Tm, modelrun: u8, timestep: u8,
+    modelrun_date: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u8,
 ) -> impl Future<Item=f32, Error=String> {
 
-    let file_key = FileKey::new(param, modelrun_time, modelrun, timestep);
+    let file_key = FileKey::new(param, modelrun_date, modelrun, timestep);
     cache::fetch_grid(log, file_key)
         .and_then(move |grid| {
             if icon::icon_verify_parameter(param, &grid) {
@@ -197,7 +174,8 @@ where FN: FnOnce() -> F, F: Future<Item=I, Error=String> {
 }
 
 fn fetch_all(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, mrt: time::Tm, mr: u8, t0: time::Tm, ts: u8, t1: time::Tm, ts1: u8,
+    log: Arc<TaggedLog>, lat: f32, lon: f32, mrt: chrono::Date<chrono::Utc>, mr: u8,
+    t0: chrono::DateTime<chrono::Utc>, ts: u8, t1: chrono::DateTime<chrono::Utc>, ts1: u8,
     tcc: bool, wind: bool, precip: bool, rain: bool, snow: bool, depth: bool
 ) -> Box<dyn Future<Item=Forecast, Error=String> + Send> {
 
@@ -250,20 +228,20 @@ fn fetch_all(
 use super::TaggedLog;
 
 fn select_start_time<F, R>(
-    log: Arc<TaggedLog>, target_time: time::Tm, try_func: F, try_timeout: std::time::Duration
-) -> impl Future<Item=time::Tm, Error=String>
+    log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F, try_timeout: std::time::Duration
+) -> impl Future<Item=chrono::DateTime<chrono::Utc>, Error=String>
 where
-    F: Fn(Arc<TaggedLog>, (time::Tm, u8, time::Tm, u8, time::Tm, u8)) -> R,
+    F: Fn(Arc<TaggedLog>, (chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8)) -> R,
     R: Future<Item=Forecast, Error=String>,
 {
-    let now = time::now_utc();
-    let start_time = now - time::Duration::hours(12);
+    let now = chrono::Utc::now();
+    let start_time = now - chrono::Duration::hours(12);
     let fs: Vec<_> = forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter).collect();
 
     stream::unfold(fs, |mut fs| fs.pop().map(|x| future::ok( (x, fs) )))
         .skip_while(move |(mrt, _, _, _, _, _)| future::ok(now < *mrt))
         .and_then(move |(mrt, mr, ft, ts, ft1, ts1)| {
-            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}{:03}", mrt.rfc3339(), mr, ft.rfc3339(), ts, ft1.rfc3339(), ts1));
+            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
             let log = log.clone();
             tokio::timer::Timeout::new(try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)), try_timeout)
                 .map(move |_f: Forecast| Some(mrt))
@@ -272,7 +250,7 @@ where
                     future::ok(None)
                 })
         })
-        .filter_map(|item: Option<time::Tm>| item)
+        .filter_map(|item: Option<chrono::DateTime<chrono::Utc>>| item)
         .into_future()
         .map_err(|(e, _)| e)
         .and_then(|(f, _)| f.ok_or(format!("tried all start times")))
@@ -280,7 +258,7 @@ where
 
 pub struct Forecast {
     pub temperature: f32,
-    pub time: (time::Tm, time::Tm),
+    pub time: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
     pub total_cloud_cover: Option<f32>,
     pub wind_speed: Option<(f32, f32)>,
     pub total_precip_accum: Option<(f32, f32)>,
@@ -291,18 +269,18 @@ pub struct Forecast {
 
 use super::Stream;
 
-pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: time::Tm) -> impl Stream<Item=Forecast, Error=String> {
+pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>) -> impl Stream<Item=Forecast, Error=String> {
 
     select_start_time(
         log.clone(), target_time,
-        move |log, (mrt, mr, ft, ts, ft1, ts1)| fetch_all(log, lat, lon, mrt, mr, ft, ts, ft1, ts1, false, false, false, true, true, true),
+        move |log, (mrt, mr, ft, ts, ft1, ts1)| fetch_all(log, lat, lon, mrt.date(), mr, ft, ts, ft1, ts1, false, false, false, true, true, true),
         std::time::Duration::from_secs(7)
     )
         .map(move |f| {
             stream::iter_ok(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
                 .and_then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
-                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}{:03}", mrt.rfc3339(), mr, ft.rfc3339(), ts, ft1.rfc3339(), ts1));
-                    fetch_all(log.clone(), lat, lon, mrt, mr, ft, ts, ft1, ts1, false, false, false, true, true, true)
+                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
+                    fetch_all(log.clone(), lat, lon, mrt.date(), mr, ft, ts, ft1, ts1, false, false, false, true, true, true)
                 }})
                 .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
                 .then(|result: Result<_, String>| future::ok(result)) // stream of values --> stream of results

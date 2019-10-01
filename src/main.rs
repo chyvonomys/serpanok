@@ -1,6 +1,6 @@
 extern crate futures;
 extern crate tokio;
-extern crate time;
+extern crate chrono;
 extern crate itertools;
 #[macro_use] extern crate nom;
 extern crate bzip2;
@@ -15,6 +15,7 @@ extern crate serde_json;
 extern crate regex;
 
 use std::io::Read;
+use chrono::{Datelike, TimeZone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Parameter {
@@ -53,24 +54,19 @@ impl FileKey {
         }
     }
 
-    fn new(param: Parameter, tm: time::Tm, modelrun: u8, timestep: u8) -> Self {
+    fn new(param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u8) -> Self {
         Self {
             param,
-            yyyy: tm.tm_year as u16 + 1900,
-            mm: tm.tm_mon as u8+ 1,
-            dd: tm.tm_mday as u8,
+            yyyy: dt.year() as u16,
+            mm: dt.month() as u8,
+            dd: dt.day() as u8,
             modelrun,
             timestep,
         }
     }
 
-    fn get_modelrun_tm(&self) -> time::Tm {
-        let mut res = time::empty_tm();
-        res.tm_year = self.yyyy as i32 - 1900;
-        res.tm_mon = self.mm as i32 - 1;
-        res.tm_mday = self.dd as i32;
-        res.tm_hour = self.modelrun as i32;
-        res
+    fn get_modelrun_tm(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.ymd(self.yyyy.into(), self.mm.into(), self.dd.into()).and_hms(self.modelrun.into(), 0, 0)
     }
 }
 
@@ -88,7 +84,7 @@ pub struct TaggedLog {
 
 impl TaggedLog {
     fn add_line(&self, s: &str) {
-        println!("[{}] {} {}", time::now_utc().rfc3339(), &self.tag, s);
+        println!("[{}] {} {}", chrono::Utc::now().to_rfc3339(), &self.tag, s);
     }
 }
 
@@ -190,6 +186,9 @@ impl hyper::service::Service for SerpanokApi {
 
     fn call(&mut self, req: hyper::Request<Self::ReqBody>) -> Self::Future {
         println!("request: {} {}", req.method(), req.uri());
+        let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query).into_owned().collect();
 
         match (req.method(), req.uri().path()) {
             (&hyper::Method::POST, "/bot") => {
@@ -213,17 +212,20 @@ impl hyper::service::Service for SerpanokApi {
                 Box::new(future::ok(hresp(200, body)))
             },
             (&hyper::Method::GET, "/dryrun") => {
-                let start_time = time::now_utc() - time::Duration::hours(6);
-                let target_time = req.uri().query().and_then(|q| time::strptime(q, "target=%FT%TZ").ok()).unwrap_or(time::now_utc());
+                let start_time = chrono::Utc::now() - chrono::Duration::hours(6);
+                let target_time = params.get("target")
+                    .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
+                    .map(|f| f.into())
+                    .unwrap_or(chrono::Utc::now());
                 let mut res = String::new();
                 res.push_str("----------------------------\n");
-                res.push_str(&format!("start: {}\n", start_time.rfc3339()));
-                res.push_str(&format!("now: {}\n", time::now_utc().rfc3339()));
-                res.push_str(&format!("target: {}\n", target_time.rfc3339()));
+                res.push_str(&format!("start: {}\n", start_time.to_rfc3339()));
+                res.push_str(&format!("now: {}\n", chrono::Utc::now().to_rfc3339()));
+                res.push_str(&format!("target: {}\n", target_time.to_rfc3339()));
                 res.push_str("----------------------------\n");
                 let body = data::forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter)
                     .map(|(mrt, mr, ft, ts, ft1, ts1)| format!("* {}/{:02} >> {}/{:03}  add {}/{:03}\n",
-                                                               mrt.rfc3339(), mr, ft.rfc3339(), ts, ft1.rfc3339(), ts1
+                                                               mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1
                     ))
                     .fold(res, |mut acc, x| {acc.push_str(&x); acc});
                 Box::new(future::ok(hresp(200, body)))
@@ -273,16 +275,16 @@ impl hyper::service::Service for SerpanokApi {
                 Box::new(f)
             },
             (&hyper::Method::GET, "/picker") => {
-                let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
-                let params: std::collections::HashMap<String, String> =
-                    url::form_urlencoded::parse(query).into_owned().collect();
-                let start = params.get("start").and_then(|q| time::strptime(q, "%FT%TZ").ok()).unwrap_or(time::now_utc());
+                let start = params.get("start")
+                    .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
+                    .map(|f| f.into())
+                    .unwrap_or(chrono::Utc::now());
                 let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
                 let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
                 let days = ui::time_picker(start);
-                let mut result = format!("start={}, lon={}, lat={}\n", start.strftime("%FT%TZ").unwrap(), lon, lat);
+                let mut result = format!("start={}, lon={}, lat={}\n", start.to_rfc3339(), lon, lat);
                 for day in days {
-                    result.push_str(&format!("{}-{}-{}:\n", day.0, day.1, day.2));
+                    result.push_str(&format!("{:04}-{:02}-{:02}:\n", day.0, day.1, day.2));
                     for row in day.3 {
                         for col in row {
                             if let Some(h) = col {

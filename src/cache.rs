@@ -39,14 +39,14 @@ type SharedFut<T> = future::Shared<Box<
 
 pub type MemCache<K, V> = Arc<std::sync::Mutex<std::collections::HashMap<
     K,
-    (time::Tm, SharedFut<V>)
+    (chrono::DateTime<chrono::Utc>, SharedFut<V>)
 >>>;
 
 pub fn purge_mem_cache() {
-    let now = time::now_utc();
+    let now = chrono::Utc::now();
     MEM_CACHE.lock().unwrap()
         .retain(move |key, (insert_time, _)| {
-            let keep = now - *insert_time < time::Duration::minutes(1);
+            let keep = now - *insert_time < chrono::Duration::minutes(1);
             if !keep {
                 println!("remove cache future {:?}", key)
             }
@@ -55,9 +55,9 @@ pub fn purge_mem_cache() {
 }
 
 pub fn purge_disk_cache() {
-    let deadline = time::now_utc() - time::Duration::hours(1);
+    let deadline = chrono::Utc::now() - chrono::Duration::hours(1);
     DISK_CACHE.lock().unwrap()
-        .retain(|k, _| k.get_modelrun_tm() + time::Duration::hours(k.timestep as i64) > deadline)
+        .retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(k.timestep as i64) > deadline)
 }
 
 type DiskCache<K> = Arc<std::sync::Mutex<std::collections::HashMap<
@@ -85,7 +85,7 @@ pub fn fetch_grid(
         .lock()
         .unwrap()
         .entry(file_key.clone())
-        .or_insert_with(move || (time::now_utc(), make_fetch_grid_fut(log, file_key).shared()))
+        .or_insert_with(move || (chrono::Utc::now(), make_fetch_grid_fut(log, file_key).shared()))
         .1
         .clone()
         .map(|x| { let xd: &Arc<grib::GribMessage> = &x; xd.clone() })
@@ -148,7 +148,7 @@ fn download_grid_fut(
 
     let from = icon_file.available_from();
     let to = icon_file.available_to();
-    let now = time::now_utc();
+    let now = chrono::Utc::now();
 
     let (desc, action) = if now < from {
         ("wait until model runs and files appear", Some((from, to)))
@@ -159,25 +159,25 @@ fn download_grid_fut(
     };
 
     log.add_line(&format!("file should be available from {} to {}, (now {}, so `{}`)",
-                from.rfc3339(), to.rfc3339(), now.rfc3339(), desc
+                from.to_rfc3339(), to.to_rfc3339(), now.to_rfc3339(), desc
     ));
 
-    let res: Result<(time::Tm, time::Tm), String> = action.ok_or("file is no longer available".to_owned());
+    let res: Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> = action.ok_or("file is no longer available".to_owned());
     future::result(res)
         .and_then(move |(from, to)| {
 
             let attempt_schedule = (0..)
-                .map(move |i| from + time::Duration::minutes(i * 10))
+                .map(move |i| from + chrono::Duration::minutes(i * 10))
                 .take_while(move |t| t < &to);
 
             stream::iter_ok(attempt_schedule)
                 .and_then({ let log = log.clone(); move |t| {
-                    let now = time::now_utc();
-                    log.add_line(&format!("wait until: {}, now: {}", t.rfc3339(), now.rfc3339()));
+                    let now = chrono::Utc::now();
+                    log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339(), now.to_rfc3339()));
                     let wait = if t > now {
                         t - now
                     } else {
-                        time::Duration::seconds(0)
+                        chrono::Duration::seconds(0)
                     };
 
                     // TODO: skip 0-wait?
@@ -185,7 +185,7 @@ fn download_grid_fut(
                     tokio::timer::Delay::new(std::time::Instant::now() + wait.to_std().unwrap())
                         .map_err(|e| format!("delay error: {}", e)) // TODO: mixed errors, some are acceptable for retry, other not
                         .and_then({ let log = log.clone(); let icon_file = icon_file.clone(); move |_| {
-                            log.add_line(&format!("attempt at {}", time::now_utc().rfc3339()));
+                            log.add_line(&format!("attempt at {}", chrono::Utc::now().to_rfc3339()));
                             icon_file.fetch_bytes(log)
                         }})
                 }})

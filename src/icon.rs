@@ -76,7 +76,7 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
 pub struct IconFile {
     prefix: String,
     filename: String,
-    modelrun_time: time::Tm,
+    modelrun_time: chrono::DateTime<chrono::Utc>,
 }
 
 impl IconFile {
@@ -114,11 +114,11 @@ impl IconFile {
             .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
     }
 
-    pub fn available_from(&self) -> time::Tm {
-        self.modelrun_time + time::Duration::hours(2) + time::Duration::minutes(30)
+    pub fn available_from(&self) -> chrono::DateTime<chrono::Utc> {
+        self.modelrun_time + chrono::Duration::hours(2) + chrono::Duration::minutes(30)
     }
 
-    pub fn available_to(&self) -> time::Tm {
-        self.modelrun_time + time::Duration::hours(26) + time::Duration::minutes(30)
+    pub fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
+        self.modelrun_time + chrono::Duration::hours(26) + chrono::Duration::minutes(30)
     }
 }

@@ -1,3 +1,5 @@
+use chrono::{Datelike, Timelike};
+
 pub fn format_lat_lon(lat: f32, lon: f32) -> String {
     format!("{:.03}°{} {:.03}°{}",
             lat.abs(), if lat > 0.0 {"N"} else {"S"},
@@ -9,11 +11,11 @@ const MONTH_ABBREVS: [&'static str; 12] = [
     "Січ", "Лют", "Бер", "Кві", "Тра", "Чер", "Лип", "Сер", "Вер", "Жов", "Лис", "Гру"
 ];
 
-fn format_time(t: time::Tm) -> String {
+fn format_time(t: chrono::DateTime<chrono::Utc>) -> String {
     format!("{} {} {:02}:{:02} (UTC)",
-            t.tm_mday,
-            MONTH_ABBREVS.get(t.tm_mon as usize).unwrap_or(&"?"),
-            t.tm_hour, t.tm_min
+            t.day(),
+            MONTH_ABBREVS.get(t.month() as usize).unwrap_or(&"?"),
+            t.hour(), t.minute()
     )
 }
 
