@@ -69,33 +69,6 @@ where
         .map(|(s, mr, ts, ts1)| (s, mr, ts.0, ts.1, ts1.0, ts1.1))
 }
 
-pub fn time_picker(start: time::Tm) -> Vec<(i32, i32, i32, Vec<Vec<Option<i32>>>)> {
-
-    let start00 = trunc_days_utc(start);
-
-    let groups = (0..)
-        .flat_map(|d: i64| (0..4).map(move |h: i64| d*24 + h*6))
-        .map(|h| start00 + time::Duration::hours(h))
-        .skip_while(|t| start >= *t + time::Duration::hours(5))
-        .group_by(|t| (t.tm_year, t.tm_mon, t.tm_mday));
-
-    groups
-        .into_iter()
-        .map(|(d, ts)| (d.0 + 1900, d.1 + 1, d.2, ts))
-        .take(6)
-        .map(|(y, m, d, ts)| {
-            let hs = ts
-                .map(|t| (0..6)
-                     .map(move |h| t + time::Duration::hours(h))
-                     .map(|t| if t <= start && t < start + time::Duration::hours(120) { None } else { Some(t.tm_hour) })
-                     .collect()
-                )
-                .collect();
-             (y, m, d, hs)
-        })
-        .collect()
-}
-
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a * (1.0 - t) + b * t
 }

@@ -245,6 +245,45 @@ impl Future for UserInput {
 use data;
 use format;
 
+fn trunc_days_local(t: time::Tm) -> time::Tm {
+    let mut res = time::empty_tm();
+    res.tm_year = t.tm_year;
+    res.tm_mon =  t.tm_mon;
+    res.tm_mday = t.tm_mday;
+    res.tm_yday = t.tm_yday;
+    res.tm_wday = t.tm_wday;
+    res
+}
+
+use itertools::Itertools; // group_by
+
+pub fn time_picker(start: time::Tm) -> Vec<(i32, i32, i32, Vec<Vec<Option<i32>>>)> {
+
+    let start00 = trunc_days_local(start);
+
+    let groups = (0..)
+        .flat_map(|d: i64| (0..4).map(move |h: i64| d*24 + h*6))
+        .map(|h| start00 + time::Duration::hours(h))
+        .skip_while(|t| start >= *t + time::Duration::hours(5))
+        .group_by(|t| (t.tm_year, t.tm_mon, t.tm_mday));
+
+    groups
+        .into_iter()
+        .map(|(d, ts)| (d.0 + 1900, d.1 + 1, d.2, ts))
+        .take(6)
+        .map(|(y, m, d, ts)| {
+            let hs = ts
+                .map(|t| (0..6)
+                     .map(move |h| t + time::Duration::hours(h))
+                     .map(|t| if t <= start && t < start + time::Duration::hours(120) { None } else { Some(t.tm_hour) })
+                     .collect()
+                )
+                .collect();
+             (y, m, d, hs)
+        })
+        .collect()
+}
+
 fn process_widget(
     chat_id: i64, loc_msg_id: i32, target_lat: f32, target_lon: f32
 ) -> impl Future<Item=(), Error=String> {
@@ -253,7 +292,7 @@ fn process_widget(
         .and_then(move |widget_text| {
             let mut days_map: HashMap<String, (i32, i32, i32, Vec<Vec<Option<i32>>>)> = HashMap::new();
 
-            let v = data::time_picker(time::now_utc() - time::Duration::hours(1));
+            let v = time_picker(time::now_utc() - time::Duration::hours(1));
             let first = v.iter().take(3).map(|(y, m, d, ts)| {
                     let t = format!("{:02}.{:02}", d, m);
                     days_map.insert(t.clone(), (*y, *m, *d, ts.clone()));

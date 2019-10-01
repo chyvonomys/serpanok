@@ -8,6 +8,7 @@ extern crate reqwest;
 extern crate either;
 #[macro_use] extern crate lazy_static;
 extern crate hyper;
+extern crate url;
 extern crate serde;
 extern crate serde_json;
 #[macro_use] extern crate serde_derive;
@@ -272,9 +273,28 @@ impl hyper::service::Service for SerpanokApi {
                 Box::new(f)
             },
             (&hyper::Method::GET, "/picker") => {
-                let start = req.uri().query().and_then(|q| time::strptime(q, "start=%FT%TZ").ok()).unwrap_or(time::now_utc());
-                let v = data::time_picker(start);
-                Box::new(future::ok(hresp(200, format!("start={}\n{:#?}\n", start.strftime("%FT%TZ").unwrap(), v))))
+                let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
+                let params: std::collections::HashMap<String, String> =
+                    url::form_urlencoded::parse(query).into_owned().collect();
+                let start = params.get("start").and_then(|q| time::strptime(q, "%FT%TZ").ok()).unwrap_or(time::now_utc());
+                let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
+                let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+                let days = ui::time_picker(start);
+                let mut result = format!("start={}, lon={}, lat={}\n", start.strftime("%FT%TZ").unwrap(), lon, lat);
+                for day in days {
+                    result.push_str(&format!("{}-{}-{}:\n", day.0, day.1, day.2));
+                    for row in day.3 {
+                        for col in row {
+                            if let Some(h) = col {
+                                result.push_str(&format!(" {:02} ", h));
+                            } else {
+                                result.push_str(" -- ");
+                            }
+                        }
+                        result.push_str("\n");
+                    }
+                }
+                Box::new(future::ok(hresp(200, result)))
             },
             (&hyper::Method::GET, "/uis") => {
                 let cs: Vec<(i64, i32)> = ui::USER_CLICKS.lock().unwrap().keys().cloned().collect();
