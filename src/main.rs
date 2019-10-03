@@ -4,10 +4,10 @@ extern crate chrono;
 extern crate itertools;
 #[macro_use] extern crate nom;
 extern crate bzip2;
-extern crate reqwest;
 extern crate either;
 #[macro_use] extern crate lazy_static;
 extern crate hyper;
+extern crate hyper_tls;
 extern crate url;
 extern crate serde;
 extern crate serde_json;
@@ -99,29 +99,34 @@ fn unpack_bzip2(bytes: &[u8]) -> impl Future<Item=Vec<u8>, Error=String> {
 
 use futures::{future, Future, stream, Stream};
 
-fn fold_response_body(resp: reqwest::async::Response) -> impl Future<Item=(reqwest::StatusCode, Vec<u8>), Error=String> {
+fn fold_response_body(resp: hyper::Response<hyper::Body>) -> impl Future<Item=(bool, Vec<u8>), Error=String> {
     let status = resp.status();
     resp.into_body().fold(
         Vec::new(),
-        |mut acc, x| { acc.extend_from_slice(&x); future::ok::<_, reqwest::Error>(acc) }
-    ).map(move |v| (status, v)).map_err(|e| format!("fold body error: {}", e.to_string()))
+        |mut acc, x| { acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc) }
+    ).map(move |v| (status == hyper::StatusCode::OK, v)).map_err(|e| format!("fold body error: {}", e.to_string()))
 }
 
-fn http_post_json(url: String, json: String) -> impl Future<Item=(reqwest::StatusCode, Vec<u8>), Error=String> {
+fn http_post_json(url: String, json: String) -> impl Future<Item=(bool, Vec<u8>), Error=String> {
+    let req = hyper::Request::post(&url)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(hyper::Body::from(json))
+        .expect("POST request build failed");
+
     HTTP_CLIENT
-        .post(&url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(json)
-        .send()
+        .request(req)
         .map_err(move |e| format!("POST {} failed: {}", url, e))
         .and_then(fold_response_body)
         .map_err(|e| format!("botapi response error: {}", e))
 }
 
-fn http_get(url: String) -> impl Future<Item=(reqwest::StatusCode, Vec<u8>), Error=String> {
+fn http_get(url: String) -> impl Future<Item=(bool, Vec<u8>), Error=String> {
+    let req = hyper::Request::get(&url)
+        .body(hyper::Body::from(""))
+        .expect(&format!("GET request build failed for {}", &url));
+
     HTTP_CLIENT
-        .get(&url)
-        .send()
+        .request(req)
         .map_err(move |e| format!("GET {} failed: {}", url, e))
         .and_then(fold_response_body)
         .map_err(|e| format!("botapi response error: {}", e))
@@ -129,18 +134,18 @@ fn http_get(url: String) -> impl Future<Item=(reqwest::StatusCode, Vec<u8>), Err
 
 fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Item=Vec<u8>, Error=String> {
     log.add_line(&format!("GET {}", url));
-    http_get(url)
-        .and_then(|(status, body)| {
-            if status == reqwest::StatusCode::OK {
-                future::Either::A(future::ok(body))
-            } else {
-                future::Either::B(future::err(format!("response status is {}", status)))
-            }
-        })
+    http_get(url).and_then(|(ok, body)|
+        if ok {
+            future::Either::A(future::ok(body))
+        } else {
+            future::Either::B(future::err(format!("response status is not OK")))
+        }
+    )
 }
 
 lazy_static! {
-    static ref HTTP_CLIENT: reqwest::async::Client = reqwest::async::Client::new();
+    static ref HTTP_CLIENT: hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body> = hyper::Client::builder()
+        .build::<_, hyper::Body>(hyper_tls::HttpsConnector::new(4).expect("TLS init failed"));
 }
 
 #[test]

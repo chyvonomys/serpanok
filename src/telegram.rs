@@ -231,33 +231,32 @@ pub fn get_updates(last: Option<i32>) -> impl Future<Item=Vec<(Option<i32>, Stri
         url.push_str(&(x+1).to_string());
     }
 
-    http_get(url)
-        .and_then(|(s, body)| future::result(
-            if s == reqwest::StatusCode::OK {
-                serde_json::from_slice::<TgResponse< Vec<serde_json::Value>> >(&body)
-                    .map_err(|e| format!("parse updates error: {}", e.to_string()))
-                    .and_then(|resp| resp.to_result())
-                    .map(|v| v.iter().map(|i| (
-                        i.get("update_id").and_then(|n| n.as_i64().map(|x| x as i32)),
-                        i.to_string()
-                    )).collect())
-            } else {
-                Err(format!("status code: {:?}, body: {:?}", s, String::from_utf8(body)))
-            }
-        ))
+    http_get(url).and_then(|(ok, body)| future::result(
+        if ok {
+            serde_json::from_slice::<TgResponse< Vec<serde_json::Value>> >(&body)
+                .map_err(|e| format!("parse updates error: {}", e.to_string()))
+                .and_then(|resp| resp.to_result())
+                .map(|v| v.iter().map(|i| (
+                    i.get("update_id").and_then(|n| n.as_i64().map(|x| x as i32)),
+                    i.to_string()
+                )).collect())
+        } else {
+            Err(format!("ok: {:?}, body: {:?}", ok, String::from_utf8(body)))
+        }
+    ))
 }
 
 pub fn tg_call<S, R>(call: &'static str, payload: S) -> impl Future<Item=R, Error=String>
 where S: serde::Serialize, R: serde::de::DeserializeOwned {
     let url = format!("https://api.telegram.org/bot{}/{}", BOTTOKEN, call);
     let json = serde_json::to_string(&payload).unwrap();
-    http_post_json(url, json).and_then(|(s, body)| future::result(
-        if s != reqwest::StatusCode::OK {
-            Err(format!("status code: {:?}, body: {:?}", s, String::from_utf8(body)))
-        } else {
+    http_post_json(url, json).and_then(|(ok, body)| future::result(
+        if ok {
             serde_json::from_reader::<_, TgResponse<R>>(std::io::Cursor::new(body))
                 .map_err(|e| format!("parse response error: {}", e.to_string()))
                 .and_then(|resp| resp.to_result())
+        } else {
+            Err(format!("ok: {:?}, body: {:?}", ok, String::from_utf8(body)))
         }
     ))
 }
