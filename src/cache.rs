@@ -57,7 +57,7 @@ pub fn purge_mem_cache() {
 pub fn purge_disk_cache() {
     let deadline = chrono::Utc::now() - chrono::Duration::hours(1);
     DISK_CACHE.lock().unwrap()
-        .retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(k.timestep as i64) > deadline)
+        .retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(i64::from(k.timestep)) > deadline)
 }
 
 type DiskCache<K> = Arc<std::sync::Mutex<std::collections::HashMap<
@@ -162,13 +162,15 @@ fn download_grid_fut(
                 from.to_rfc3339(), to.to_rfc3339(), now.to_rfc3339(), desc
     ));
 
-    let res: Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> = action.ok_or("file is no longer available".to_owned());
+    let res: Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> =
+        action.ok_or_else(|| "file is no longer available".to_owned());
+
     future::result(res)
         .and_then(move |(from, to)| {
 
             let attempt_schedule = (0..)
                 .map(move |i| from + chrono::Duration::minutes(i * 10))
-                .take_while(move |t| t < &to);
+                .take_while(move |t| *t < to);
 
             stream::iter_ok(attempt_schedule)
                 .and_then({ let log = log.clone(); move |t| {
@@ -190,11 +192,11 @@ fn download_grid_fut(
                         }})
                 }})
                 .inspect_err(move |e| log.add_line(&format!("inspect err: {}", e)))
-                .then(|result: Result<Vec<u8>, String>| future::ok(result)) // stream of vec --> stream of results
+                .then(future::ok) // stream of vec --> stream of results
                 .filter_map(|item: Result<Vec<u8>, String>| item.ok())
                 .into_future()
                 .map_err(|x: (String, _)| x.0)
-                .and_then(|x: (Option<Vec<u8>>, _)| future::result(x.0.ok_or("give up, file did not appear".to_owned())))
+                .and_then(|x: (Option<Vec<u8>>, _)| future::result(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
         })
 }
 

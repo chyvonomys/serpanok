@@ -7,7 +7,7 @@ pub fn format_lat_lon(lat: f32, lon: f32) -> String {
     )
 }
 
-const MONTH_ABBREVS: [&'static str; 12] = [
+const MONTH_ABBREVS: [&str; 12] = [
     "Січ", "Лют", "Бер", "Кві", "Тра", "Чер", "Лип", "Сер", "Вер", "Жов", "Лис", "Гру"
 ];
 
@@ -28,7 +28,7 @@ fn format_rain_rate(mmhr: f32) -> String {
         Some("\u{1F4A7}\u{1F4A7}")
     } else {
         Some("\u{1F4A7}\u{1F4A7}\u{1F4A7}")
-    }.map(|g| format!("{}{:.2}мм/год", g, mmhr)).unwrap_or("--".to_owned())
+    }.map(|g| format!("{}{:.2}мм/год", g, mmhr)).unwrap_or_else(|| "--".to_owned())
 }
 
 fn format_snow_rate(mmhr: f32) -> String {
@@ -42,11 +42,11 @@ fn format_snow_rate(mmhr: f32) -> String {
         Some("\u{2744}\u{2744}\u{2744}")
     } else {
         Some("\u{2744}\u{26A0}")
-    }.map(|g| format!("{}{:.2}мм/год", g, mmhr)).unwrap_or("--".to_owned())
+    }.map(|g| format!("{}{:.2}мм/год", g, mmhr)).unwrap_or_else(|| "--".to_owned())
 }
 
 fn format_wind_dir(u: f32, v: f32) -> &'static str {
-    let ws_az = (-v).atan2(-u) / 3.1415926535 * 180.0;
+    let ws_az = (-v).atan2(-u) / std::f32::consts::PI * 180.0;
 
     if ws_az > 135.0 + 22.5 {
         "\u{2192}"

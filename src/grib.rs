@@ -104,12 +104,12 @@ named!(parse_section3<Section3>, do_parse!(
     _basic_angle_subdiv: tag!(&[0xFF; 4]) >>
     lat_first: call!(parse_i32) >>
     lon_first: call!(parse_i32) >>
-    _res_comp_flags: tag!(&[0b00110000]) >>
+    _res_comp_flags: tag!(&[0b0011_0000]) >>
     lat_last: call!(parse_i32) >>
     lon_last: call!(parse_i32) >>
     di: call!(be_u32) >>
     dj: call!(be_u32) >>
-    _scan_mode: tag!(&[0b01000000]) >>
+    _scan_mode: tag!(&[0b0100_0000]) >>
   
     (Section3 {
         n_data_points, ni, nj, di, dj,

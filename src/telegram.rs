@@ -41,11 +41,11 @@ pub struct TgResponse<T> {
 }
 
 impl<T> TgResponse<T> {
-    pub fn to_result(self) -> Result<T, String> {
+    pub fn into_result(self) -> Result<T, String> {
         if self.ok {
-            self.result.ok_or("result field is missing".to_owned())
+            self.result.ok_or_else(|| "result field is missing".to_owned())
         } else {
-            Err(self.description.unwrap_or("description field is missing".to_owned()))
+            Err(self.description.unwrap_or_else(|| "description field is missing".to_owned()))
         }
     }
 }
@@ -220,7 +220,7 @@ impl TgInlineKeyboardButtonCB {
     }
 }
 
-static BOTTOKEN: &'static str = include_str!("../bottoken.txt");
+static BOTTOKEN: &str = include_str!("../bottoken.txt");
 
 use futures::{future, Future};
 
@@ -235,7 +235,7 @@ pub fn get_updates(last: Option<i32>) -> impl Future<Item=Vec<(Option<i32>, Stri
         if ok {
             serde_json::from_slice::<TgResponse< Vec<serde_json::Value>> >(&body)
                 .map_err(|e| format!("parse updates error: {}", e.to_string()))
-                .and_then(|resp| resp.to_result())
+                .and_then(|resp| resp.into_result())
                 .map(|v| v.iter().map(|i| (
                     i.get("update_id").and_then(|n| n.as_i64().map(|x| x as i32)),
                     i.to_string()
@@ -254,7 +254,7 @@ where S: serde::Serialize, R: serde::de::DeserializeOwned {
         if ok {
             serde_json::from_reader::<_, TgResponse<R>>(std::io::Cursor::new(body))
                 .map_err(|e| format!("parse response error: {}", e.to_string()))
-                .and_then(|resp| resp.to_result())
+                .and_then(|resp| resp.into_result())
         } else {
             Err(format!("ok: {:?}, body: {:?}", ok, String::from_utf8(body)))
         }

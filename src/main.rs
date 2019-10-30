@@ -123,7 +123,7 @@ fn http_post_json(url: String, json: String) -> impl Future<Item=(bool, Vec<u8>)
 fn http_get(url: String) -> impl Future<Item=(bool, Vec<u8>), Error=String> {
     let req = hyper::Request::get(&url)
         .body(hyper::Body::from(""))
-        .expect(&format!("GET request build failed for {}", &url));
+        .unwrap_or_else(|_| panic!("GET request build failed for {}", &url));
 
     HTTP_CLIENT
         .request(req)
@@ -138,7 +138,7 @@ fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Item=Ve
         if ok {
             future::Either::A(future::ok(body))
         } else {
-            future::Either::B(future::err(format!("response status is not OK")))
+            future::Either::B(future::err("response status is not OK".to_string()))
         }
     )
 }
@@ -221,7 +221,7 @@ impl hyper::service::Service for SerpanokApi {
                 let target_time = params.get("target")
                     .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                     .map(|f| f.into())
-                    .unwrap_or(chrono::Utc::now());
+                    .unwrap_or_else(chrono::Utc::now);
                 let mut res = String::new();
                 res.push_str("----------------------------\n");
                 res.push_str(&format!("start: {}\n", start_time.to_rfc3339()));
@@ -283,14 +283,15 @@ impl hyper::service::Service for SerpanokApi {
                 let start = params.get("start")
                     .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                     .map(|f| f.into())
-                    .unwrap_or(chrono::Utc::now());
+                    .unwrap_or_else(chrono::Utc::now);
                 let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
                 let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
                 let days = ui::time_picker(start);
                 let mut result = format!("start={}, lon={}, lat={}\n", start.to_rfc3339(), lon, lat);
                 for day in days {
-                    result.push_str(&format!("{:04}-{:02}-{:02}:\n", day.0, day.1, day.2));
-                    for row in day.3 {
+                    let (y, m, d) = day.0;
+                    result.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
+                    for row in day.1 {
                         for col in row {
                             if let Some(h) = col {
                                 result.push_str(&format!(" {:02} ", h));

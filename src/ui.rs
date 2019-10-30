@@ -35,7 +35,7 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Erro
         let f = fts
             .into_future()
             .map_err(|(e, _)| e)
-            .and_then(|(f, _)| f.ok_or(format!("no current forecast")))
+            .and_then(|(f, _)| f.ok_or_else(|| "no current forecast".to_owned()))
             .and_then(move |format::ForecastText(upd)| tg_send_widget(chat_id, upd, Some(loc_msg_id), None, true).map(|_msg| (1, false)));
         future::Either::A(f)
     } else {
@@ -125,13 +125,15 @@ fn tg_answer_cbq(id: String, notification: Option<String>) -> impl Future<Item=(
         .and_then(|t| if t { Ok(()) } else { Err("should return true".to_owned()) })
 }
 
+type MsgId = (i64, i32);
+
 lazy_static! {
-    pub static ref USER_CLICKS: Arc<Mutex<HashMap<(i64, i32), futures::sync::oneshot::Sender<String>>>> = Arc::default();
+    pub static ref USER_CLICKS: Arc<Mutex<HashMap<MsgId, futures::sync::oneshot::Sender<String>>>> = Arc::default();
     pub static ref USER_INPUTS: Arc<Mutex<HashMap<i64, futures::sync::oneshot::Sender<String>>>> = Arc::default();
 }
 
-const PADDING_DATA: &'static str = "na";
-const CANCEL_DATA: &'static str = "xx";
+const PADDING_DATA: &str = "na";
+const CANCEL_DATA: &str = "xx";
 
 pub fn make_cancel_row() -> Vec<telegram::TgInlineKeyboardButtonCB>{
     vec![telegram::TgInlineKeyboardButtonCB::new("скасувати".to_owned(), CANCEL_DATA.to_owned())]
@@ -163,7 +165,7 @@ impl UserClick {
 
 impl Drop for UserClick {
     fn drop(&mut self) {
-        if let Some(_) = USER_CLICKS.lock().unwrap().remove(&(self.chat_id, self.msg_id)) {
+        if USER_CLICKS.lock().unwrap().remove(&(self.chat_id, self.msg_id)).is_some() {
             println!("remove unused user click {}:{}", self.chat_id, self.msg_id);
         }
     }
@@ -202,7 +204,7 @@ impl UserInput {
 
 impl Drop for UserInput {
     fn drop(&mut self) {
-        if let Some(_) = USER_INPUTS.lock().unwrap().remove(&self.chat_id) {
+        if USER_INPUTS.lock().unwrap().remove(&self.chat_id).is_some() {
             println!("drop unused user input {}", self.chat_id);
         }
     }
@@ -221,7 +223,9 @@ use format;
 
 use itertools::Itertools; // group_by
 
-pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(i32, u32, u32, Vec<Vec<Option<u32>>>)> {
+type Ymd = (i32, u32, u32);
+
+pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
 
     let start00 = start.date().and_hms(0, 0, 0);
 
@@ -233,9 +237,8 @@ pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(i32, u32, u32, 
 
     groups
         .into_iter()
-        .map(|(d, ts)| (d.0, d.1, d.2, ts))
         .take(6)
-        .map(|(y, m, d, ts)| {
+        .map(|(ymd, ts)| {
             let hs = ts
                 .map(|t| (0..6)
                      .map(move |h| t + chrono::Duration::hours(h))
@@ -243,7 +246,7 @@ pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(i32, u32, u32, 
                      .collect()
                 )
                 .collect();
-             (y, m, d, hs)
+             (ymd, hs)
         })
         .collect()
 }
@@ -254,17 +257,18 @@ fn process_widget(
 
     future::ok(format!("координати: *{}*", format::format_lat_lon(target_lat, target_lon)))
         .and_then(move |widget_text| {
-            let mut days_map: HashMap<String, (i32, u32, u32, Vec<Vec<Option<u32>>>)> = HashMap::new();
+            type HourGrid = Vec<Vec<Option<u32>>>;
+            let mut days_map: HashMap<String, (Ymd, HourGrid)> = HashMap::new();
 
             let v = time_picker(chrono::Utc::now() - chrono::Duration::hours(1));
-            let first = v.iter().take(3).map(|(y, m, d, ts)| {
-                    let t = format!("{:02}.{:02}", d, m);
-                    days_map.insert(t.clone(), (*y, *m, *d, ts.clone()));
+            let first = v.iter().take(3).map(|(ymd, ts)| {
+                    let t = format!("{:02}.{:02}", ymd.2, ymd.1);
+                    days_map.insert(t.clone(), (*ymd, ts.clone()));
                     telegram::TgInlineKeyboardButtonCB::new(t.clone(), t)
                 }).collect();
-            let second = v.iter().skip(3).take(3).map(|(y, m, d, ts)| {
-                    let t = format!("{:02}.{:02}", d, m);
-                    days_map.insert(t.clone(), (*y, *m, *d, ts.clone()));
+            let second = v.iter().skip(3).take(3).map(|(ymd, ts)| {
+                    let t = format!("{:02}.{:02}", ymd.2, ymd.1);
+                    days_map.insert(t.clone(), (*ymd, ts.clone()));
                     telegram::TgInlineKeyboardButtonCB::new(t.clone(), t)
                 }).collect();
             let inline_keyboard = vec![
@@ -282,7 +286,7 @@ fn process_widget(
                 )
         })
         .and_then(move |(mut widget_text, msg_id, build)| {
-            if let Some((y, m, d, tss)) = build {
+            if let Some((ymd, tss)) = build {
                 let mut hours_map: HashMap<String, u32> = HashMap::new();
 
                 let mut inline_keyboard: Vec<Vec<_>> = tss.iter().map(|r| {
@@ -304,13 +308,13 @@ fn process_widget(
                 inline_keyboard.push(make_cancel_row());
 
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
-                widget_text.push_str(&format!("\nдата: *{}-{:02}-{:02}*", y, m, d));
+                widget_text.push_str(&format!("\nдата: *{}-{:02}-{:02}*", ymd.0, ymd.1, ymd.2));
 
                 let f = tg_update_widget(chat_id, msg_id, format!("{}\nвибери час (utc):", widget_text), keyboard, true)
                     .and_then(move |()|
                         UserClick::new(chat_id, msg_id)
                             .map(move |data| {
-                                let build = hours_map.remove(&data).map(|h| chrono::Utc.ymd(y, m, d).and_hms(h, 0, 0));
+                                let build = hours_map.remove(&data).map(|h| chrono::Utc.ymd(ymd.0, ymd.1, ymd.2).and_hms(h, 0, 0));
                                 (widget_text, msg_id, build)
                             })
                     );
@@ -408,14 +412,14 @@ pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Item=(), Error=
     process_bot(SeUpdate::from(tgu))
 }
 
-static ANDRIY: i64 = 54462285;
+static ANDRIY: i64 = 54_462_285;
 
-static SEND_LOCATION_MSG: &'static str = "покажи локацію для якої потрібно відслідковувати погоду";
-static WRONG_LOCATION_MSG: &'static str = "я можу відслідковувати тільки європейську погоду";
-static UNKNOWN_COMMAND_MSG: &'static str = "я розумію лише команду /start";
-static CBQ_ERROR_MSG: &'static str = "помилка";
-static PADDING_BTN_MSG: &'static str = "недоcтупна опція";
-static TEXT_ERROR_MSG: &'static str = "я не розумію";
+static SEND_LOCATION_MSG: &str = "покажи локацію для якої потрібно відслідковувати погоду";
+static WRONG_LOCATION_MSG: &str = "я можу відслідковувати тільки європейську погоду";
+static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
+static CBQ_ERROR_MSG: &str = "помилка";
+static PADDING_BTN_MSG: &str = "недоcтупна опція";
+static TEXT_ERROR_MSG: &str = "я не розумію";
 
 // TODO: what if user deletes chat or deletes widget message??
 // ANSWER: in private chats user can only delete message for himself
@@ -426,7 +430,7 @@ static TEXT_ERROR_MSG: &'static str = "я не розумію";
 // NOTE: allow only private chat communication for now
 fn process_bot(upd: SeUpdate) -> Box<dyn Future<Item=(), Error=String> + Send> {
     match upd {
-        SeUpdate::PrivateChat {chat_id, user: _, update} => match update {
+        SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
                     "/start" => Box::new(tg_send_widget(chat_id, SEND_LOCATION_MSG.to_owned(), None, None, false).map(|_| ())),
@@ -528,10 +532,10 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
-                    message_id: _,
                     text: Some(text),
                     entities: None,
                     location: None,
+                    ..
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Text(text) },
@@ -540,10 +544,9 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
-                    message_id: _,
-                    text: _,
                     entities: Some(_),
                     location: None,
+                    ..
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
