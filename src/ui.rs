@@ -11,6 +11,14 @@ lazy_static! {
     pub static ref SUBS: Arc<Mutex<HashMap<(i64, i32), Sub>>> = Arc::default();
 }
 
+fn update_ui(chat_id: i64, last: Option<i32>) -> impl Future<Item=(), Error=String> {
+    if let Some(last_msg_id) = last {
+        future::Either::A(tg_edit_kb(chat_id, last_msg_id, None))
+    } else {
+        future::Either::B(future::ok( () ))
+    }
+}
+
 pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Error=String> + Send> {
     let key = (sub.chat_id, sub.widget_message_id);
     {
@@ -36,33 +44,33 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Erro
             .into_future()
             .map_err(|(e, _)| e)
             .and_then(|(f, _)| f.ok_or_else(|| "no current forecast".to_owned()))
-            .and_then(move |format::ForecastText(upd)| tg_send_widget(chat_id, upd, Some(loc_msg_id), None, true).map(|_msg| (1, false)));
-        future::Either::A(f)
+            .and_then(move |format::ForecastText(upd)|
+                tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), None).map(|_msg| 1)
+            );
+        future::Either::A(f.map(|n| (n, false)))
     } else {
         let f = fts
-            .fold( (0, None, false), move |(n, last, _), format::ForecastText(upd)| {
-                if let Some(last_msg_id) = last {
-                    future::Either::A(tg_edit_kb(chat_id, last_msg_id, None))
-                } else {
-                    future::Either::B(future::ok( () ))
-                }.and_then(move |()| {
+            .fold( (0, None), move |(n, prev), format::ForecastText(upd)| {
+                update_ui(chat_id, prev).and_then(move |()| {
                     let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
 
-                    tg_send_widget(chat_id, upd, Some(loc_msg_id), Some(keyboard), true)
-                    .map(move |msg_id| (n + 1, Some(msg_id), false))
+                    tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), Some(keyboard))
+                        .map(move |msg_id| (n + 1, Some(msg_id)))
                 })
             })
-            .and_then(move |(n, last, int)| {
-                if let Some(last_msg_id) = last {
-                    future::Either::A(tg_edit_kb(chat_id, last_msg_id, None))
-                } else {
-                    future::Either::B(future::ok( () ))
-                }.and_then(move |()|
-                    tg_send_widget(chat_id, format!("вичерпано ({} оновлень)", n), Some(loc_msg_id), None, false)
-                        .map(move |_msg_id| (n, int))
-                )
+            .and_then(move |(n, prev)| {
+                update_ui(chat_id, prev)
+                    .and_then(move |()| {
+                        tg_send_widget(
+                            chat_id,
+                            TgText::Plain(format!("вичерпано ({} оновлень)", n)),
+                            Some(loc_msg_id),
+                            None
+                        ).map(move |_msg_id| n)
+                    })
             });
-        future::Either::B(f)
+        
+        future::Either::B(f.map(|n| (n, false)))
     }
         .inspect(move |(n, int)| log.add_line(&format!("done: {} updates, interrupted: {}", n, int)))
         .map_err(|e| format!("subscription future error: {}", e))
@@ -95,27 +103,44 @@ pub struct Sub {
     target_time: chrono::DateTime<chrono::Utc>,
 }
 
+#[allow(dead_code)]
+enum TgText {
+    Markdown(String),
+    HTML(String),
+    Plain(String),
+}
+
+impl TgText {
+    fn into_pair(self) -> (Option<String>, String) {
+        match self {
+            TgText::Markdown(x) => (Some("Markdown".to_owned()), x),
+            TgText::HTML(x) => (Some("HTML".to_owned()), x),
+            TgText::Plain(x) => (None, x),
+        }
+    }
+}
+
 fn tg_update_widget(
-    chat_id: i64, message_id: i32, text: String, reply_markup: Option<telegram::TgInlineKeyboardMarkup>, md: bool
+    chat_id: i64, message_id: i32, text: TgText, reply_markup: Option<telegram::TgInlineKeyboardMarkup>
 ) -> impl Future<Item=(), Error=String> {
 
+    let (parse_mode, text) = text.into_pair();
     telegram::tg_call("editMessageText", telegram::TgEditMsg {
-        chat_id, text, message_id, reply_markup,
-        parse_mode: if md { Some("Markdown".to_owned()) } else { None }
+        chat_id, text, message_id, reply_markup, parse_mode
     }).map(|telegram::TgMessageUltraLite {..}| ())
 }
 
-pub fn tg_send_widget(
-    chat_id: i64, text: String, reply_to_message_id: Option<i32>, reply_markup: Option<telegram::TgInlineKeyboardMarkup>, md: bool
+fn tg_send_widget(
+    chat_id: i64, text: TgText, reply_to_message_id: Option<i32>, reply_markup: Option<telegram::TgInlineKeyboardMarkup>
 ) -> impl Future<Item=i32, Error=String> {
 
+    let (parse_mode, text) = text.into_pair();
     telegram::tg_call("sendMessage", telegram::TgSendMsg {
-        chat_id, text, reply_to_message_id, reply_markup,
-        parse_mode: if md { Some("Markdown".to_owned()) } else { None }
+        chat_id, text, reply_to_message_id, reply_markup, parse_mode
     }).map(|m: telegram::TgMessageUltraLite| m.message_id)
 }
 
-pub fn tg_edit_kb(chat_id: i64, message_id: i32, reply_markup: Option<telegram::TgInlineKeyboardMarkup>) -> impl Future<Item=(), Error=String> {
+fn tg_edit_kb(chat_id: i64, message_id: i32, reply_markup: Option<telegram::TgInlineKeyboardMarkup>) -> impl Future<Item=(), Error=String> {
     telegram::tg_call("editMessageReplyMarkup", telegram::TgEditMsgKb {chat_id, message_id, reply_markup})
         .map(|telegram::TgMessageUltraLite {..}| ())
 }
@@ -135,7 +160,7 @@ lazy_static! {
 const PADDING_DATA: &str = "na";
 const CANCEL_DATA: &str = "xx";
 
-pub fn make_cancel_row() -> Vec<telegram::TgInlineKeyboardButtonCB>{
+fn make_cancel_row() -> Vec<telegram::TgInlineKeyboardButtonCB>{
     vec![telegram::TgInlineKeyboardButtonCB::new("скасувати".to_owned(), CANCEL_DATA.to_owned())]
 }
 
@@ -279,7 +304,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, format!("{}\nвибери дату (utc):", widget_text), Some(loc_msg_id), Some(keyboard), true)
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nвибери дату (utc):", widget_text)), Some(loc_msg_id), Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -310,7 +335,7 @@ fn process_widget(
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
                 widget_text.push_str(&format!("\nдата: *{}-{:02}-{:02}*", ymd.0, ymd.1, ymd.2));
 
-                let f = tg_update_widget(chat_id, msg_id, format!("{}\nвибери час (utc):", widget_text), keyboard, true)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nвибери час (utc):", widget_text)), keyboard)
                     .and_then(move |()|
                         UserClick::new(chat_id, msg_id)
                             .map(move |data| {
@@ -335,7 +360,7 @@ fn process_widget(
                 widget_text.push_str(&format!("\nчас: *{:02}:00 (utc)*", target_time.hour()));
                 let text = format!("{}\nякий прогноз цікавить:", widget_text);
 
-                let f = tg_update_widget(chat_id, msg_id, text, keyboard, true).and_then(move |()| {
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), keyboard).and_then(move |()| {
                     UserClick::new(chat_id, msg_id)
                         .map(move |data: String| {
                             match data.as_str() {
@@ -361,7 +386,7 @@ fn process_widget(
                 let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
                 let text = format!("{}\nдай назву цьому спостереженню:", widget_text);
 
-                let f = tg_update_widget(chat_id, msg_id, text, Some(keyboard), true)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), Some(keyboard))
                     .and_then(move |()| Future::select(
                             UserInput::new(chat_id).map(move |name| Some((target_time, Some(name)))),
                             UserClick::new(chat_id, msg_id).map(move |_| None)
@@ -377,7 +402,7 @@ fn process_widget(
                     widget_text.push_str(&format!("\nназва: *{}*", name));
                 }
 
-                let f = tg_update_widget(chat_id, msg_id, format!("{}\nстан: *відслідковується*", widget_text), None, true)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *відслідковується*", widget_text)), None)
                     .and_then(move |()| {
                         let sub = Sub {
                             chat_id, name,
@@ -400,10 +425,10 @@ fn process_widget(
                 Some( (times, true) ) => format!("скасовано ({})", times),
                 None => "скасовано".to_owned(),
             };
-            tg_update_widget(chat_id, msg_id, format!("{}\nстан: *{}*", widget_text, status), None, true)
+            tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *{}*", widget_text, status)), None)
         })
         .or_else(move |e| {
-            tg_send_widget(chat_id, format!("сталась помилка: `{}`", e), Some(loc_msg_id), None, true)
+            tg_send_widget(chat_id, TgText::Markdown(format!("сталась помилка: `{}`", e)), Some(loc_msg_id), None)
                 .map(|_msg| ())
         })
 }
@@ -433,14 +458,14 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Item=(), Error=String> + Send> {
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
-                    "/start" => Box::new(tg_send_widget(chat_id, SEND_LOCATION_MSG.to_owned(), None, None, false).map(|_| ())),
-                    _ => Box::new(tg_send_widget(chat_id, UNKNOWN_COMMAND_MSG.to_owned(), None, None, false).map(|_| ())),
+                    "/start" => Box::new(tg_send_widget(chat_id, TgText::Plain(SEND_LOCATION_MSG.to_owned()), None, None).map(|_| ())),
+                    _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map(|_| ())),
                 },
             SeUpdateVariant::Location {location, msg_id} =>
                 if location.latitude > 29.5 && location.latitude < 70.5 && location.longitude > -23.5 && location.longitude < 45.0 {
                     Box::new(process_widget(chat_id, msg_id, location.latitude, location.longitude))
                 } else {
-                    Box::new(tg_send_widget(chat_id, WRONG_LOCATION_MSG.to_owned(), None, None, false).map(|_| ()))
+                    Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map(|_| ()))
                 }
             SeUpdateVariant::CBQ {id, msg_id, data} =>
                 if data == PADDING_DATA { // TODO: this is wrong place to check this
@@ -463,12 +488,12 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Item=(), Error=String> + Send> {
                 if ok {
                     Box::new(future::ok( () ))
                 } else {
-                    Box::new(tg_send_widget(chat_id, TEXT_ERROR_MSG.to_owned(), None, None, false).map(|_m| () ))
+                    Box::new(tg_send_widget(chat_id, TgText::Plain(TEXT_ERROR_MSG.to_owned()), None, None).map(|_m| () ))
                 }
             },
         },            
         SeUpdate::Other(update) =>
-            Box::new(tg_send_widget(ANDRIY, format!("unsupported update:\n{:#?}", update), None, None, false).map(|_| ())),
+            Box::new(tg_send_widget(ANDRIY, TgText::Plain(format!("unsupported update:\n{:#?}", update)), None, None).map(|_| ())),
     }
 }
 
