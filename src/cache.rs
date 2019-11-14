@@ -186,10 +186,10 @@ fn download_grid_fut(
 
                     tokio::timer::Delay::new(std::time::Instant::now() + wait.to_std().unwrap())
                         .map_err(|e| format!("delay error: {}", e)) // TODO: mixed errors, some are acceptable for retry, other not
-                        .and_then({ let log = log.clone(); let icon_file = icon_file.clone(); move |_| {
-                            log.add_line(&format!("attempt at {}", chrono::Utc::now().to_rfc3339()));
-                            icon_file.fetch_bytes(log)
-                        }})
+                        .and_then({
+                            let log = log.clone(); let icon_file = icon_file.clone();
+                            move |_| icon_file.fetch_bytes(log)
+                        })
                 }})
                 .inspect_err(move |e| log.add_line(&format!("inspect err: {}", e)))
                 .then(future::ok) // stream of vec --> stream of results

@@ -14,7 +14,7 @@ const MONTH_ABBREVS: [&str; 12] = [
 fn format_time(t: chrono::DateTime<chrono::Utc>) -> String {
     format!("{} {} {:02}:{:02} (UTC)",
             t.day(),
-            MONTH_ABBREVS.get(t.month() as usize).unwrap_or(&"?"),
+            MONTH_ABBREVS.get(t.month0() as usize).unwrap_or(&"?"),
             t.hour(), t.minute()
     )
 }

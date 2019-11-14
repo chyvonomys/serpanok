@@ -266,7 +266,7 @@ where
     stream::unfold(fs, |mut fs| fs.pop().map(|x| future::ok( (x, fs) )))
         .skip_while(move |(mrt, _, _, _, _, _)| future::ok(now < *mrt))
         .and_then(move |(mrt, mr, ft, ts, ft1, ts1)| {
-            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
+            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
             let log = log.clone();
             tokio::timer::Timeout::new(try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)), try_timeout)
                 .map(move |_f: Forecast| Some(mrt))
@@ -304,7 +304,7 @@ pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chr
         .map(move |f| {
             stream::iter_ok(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
                 .and_then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
-                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
+                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
                     fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), ParameterFlags::default1())
                 }})
                 .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
