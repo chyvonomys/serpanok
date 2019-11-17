@@ -2,24 +2,42 @@ use telegram;
 use super::{Future, Stream};
 use super::TaggedLog;
 use future;
+use stream;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use chrono::{Datelike, Timelike, TimeZone};
 
-// TODO: cancelation button on updates does nothing
 lazy_static! {
     pub static ref SUBS: Arc<Mutex<HashMap<(i64, i32), Sub>>> = Arc::default();
 }
 
-fn update_ui(chat_id: i64, last: Option<i32>) -> impl Future<Item=(), Error=String> {
-    if let Some(last_msg_id) = last {
-        future::Either::A(tg_edit_kb(chat_id, last_msg_id, None))
-    } else {
-        future::Either::B(future::ok( () ))
-    }
+fn iter_cancel<S, I, SE, CE, CFn, CFt>(init: I, mut s: S, mut cf: CFn) -> impl Stream<Item=I, Error=SE> where
+    I: Clone,
+    CFn: FnMut(Option<I>, I) -> CFt + 'static,
+    CFt: Future<Item=(), Error=CE>,
+    S: Stream<Item=I, Error=SE>,
+{
+    let mut cancel_fut: CFt = cf(None, init.clone());
+    let mut prev = Some(init);
+
+    stream::poll_fn(
+        move || -> futures::Poll<Option<I>, SE> {
+            match cancel_fut.poll() {
+                Ok(futures::Async::Ready(())) => Ok(futures::Async::Ready(None)),
+                Ok(futures::Async::NotReady) | Err(_) => {
+                    let res = s.poll();
+                    if let Ok(futures::Async::Ready(Some(ref i))) = res {
+                        cancel_fut = cf(prev.clone(), i.clone());
+                        prev = Some(i.clone());
+                    }
+                    res
+                }
+            }
+        }
+    )
 }
 
-pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Error=String> + Send> {
+pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=usize, Error=String> + Send> {
     let key = (sub.chat_id, sub.widget_message_id);
     {
         let mut hm = SUBS.lock().unwrap();
@@ -30,6 +48,7 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Erro
 
     let chat_id = sub.chat_id;
     let loc_msg_id = sub.location_message_id;
+    let widget_msg_id = sub.widget_message_id;
     let log = Arc::new(TaggedLog {tag: format!("{}:{}", chat_id, loc_msg_id)});
     let once = sub.name.is_none();
     let fts = data::forecast_stream(log.clone(), sub.latitude, sub.longitude, sub.target_time)
@@ -39,42 +58,40 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Item=(usize, bool), Erro
             move |format::ForecastText(upd)| log.add_line(&format!("{}: {}", if once {"single update"} else {"update"}, upd))
         });
 
-    let f = if once {
-        let f = fts
-            .into_future()
-            .map_err(|(e, _)| e)
-            .and_then(|(f, _)| f.ok_or_else(|| "no current forecast".to_owned()))
-            .and_then(move |format::ForecastText(upd)|
-                tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), None).map(|_msg| 1)
-            );
-        future::Either::A(f.map(|n| (n, false)))
-    } else {
-        let f = fts
-            .fold( (0, None), move |(n, prev), format::ForecastText(upd)| {
-                update_ui(chat_id, prev).and_then(move |()| {
-                    let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
-
-                    tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), Some(keyboard))
-                        .map(move |msg_id| (n + 1, Some(msg_id)))
-                })
-            })
-            .and_then(move |(n, prev)| {
-                update_ui(chat_id, prev)
+    let f = iter_cancel(
+        widget_msg_id,
+        fts.take(if once {1} else {1000}).and_then(
+            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), None)
+        ),
+        move |remove_id, add_id| {
+            if let Some(msg_id) = remove_id {
+                future::Either::A(tg_edit_kb(chat_id, msg_id, None))
+            } else {
+                future::Either::B(future::ok( () ))
+            }
+            .and_then(move |()| {
+                let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
+                tg_edit_kb(chat_id, add_id, Some(keyboard))
                     .and_then(move |()| {
-                        tg_send_widget(
-                            chat_id,
-                            TgText::Plain(format!("вичерпано ({} оновлень)", n)),
-                            Some(loc_msg_id),
-                            None
-                        ).map(move |_msg_id| n)
+                        UserClick::new(chat_id, add_id)
+                            .and_then(move |_| tg_edit_kb(chat_id, add_id, None))
                     })
-            });
-        
-        future::Either::B(f.map(|n| (n, false)))
-    }
-        .inspect(move |(n, int)| log.add_line(&format!("done: {} updates, interrupted: {}", n, int)))
+            })
+        },
+    )
+        .fold(0, |n, _| future::ok::<_, String>(n+1))
+        .and_then(move |n| {
+            tg_send_widget(
+                chat_id,
+                TgText::Plain(format!("вичерпано ({} оновлень)", n)),
+                Some(loc_msg_id),
+                None
+            ).map(move |_msg_id| n)
+        })
+        .inspect(move |n| log.add_line(&format!("done: {} updates", n)))
         .map_err(|e| format!("subscription future error: {}", e))
         .then(move |x| {SUBS.lock().unwrap().remove(&key); future::result(x)});
+
     Box::new(f)
 }
 
@@ -421,8 +438,7 @@ fn process_widget(
         })
         .and_then(move |(widget_text, msg_id, build)| {
             let status = match build {
-                Some( (times, false) ) => format!("виконано ({})", times),
-                Some( (times, true) ) => format!("скасовано ({})", times),
+                Some(times) => format!("виконано ({})", times),
                 None => "скасовано".to_owned(),
             };
             tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *{}*", widget_text, status)), None)
