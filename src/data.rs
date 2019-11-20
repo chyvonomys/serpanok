@@ -1,3 +1,12 @@
+use super::{Parameter, FileKey, TaggedLog};
+use crate::cache;
+use crate::icon; // TODO:
+use crate::grib;
+use std::sync::Arc;
+use chrono::Timelike;
+use futures::{stream, Stream, future, Future};
+use itertools::Itertools; // tuple_windows, collect_vec
+
 pub trait Timeseries {
     fn to_u8(&self) -> u8;
 }
@@ -7,9 +16,6 @@ impl Timeseries for u8 {
         *self
     }
 }
-
-use itertools::Itertools; // tuple_windows
-use chrono::Timelike;
 
 pub fn forecast_iterator<MR, TS, TSI, MRI, MRIF, TSIF>(
     start_time: chrono::DateTime<chrono::Utc>, target_time: chrono::DateTime<chrono::Utc>, mri: MRIF, tsi: TSIF
@@ -49,8 +55,6 @@ where
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a * (1.0 - t) + b * t
 }
-
-use grib;
 
 fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -> Result<f32, String> {
     let lat = (latf * 1_000_000.0) as i32;
@@ -136,13 +140,6 @@ fn extract_value_at(grib: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32,
     }
     .and_then(|ys| extract_value_impl(&ys, &grib.section3, lat, lon))
 }
-
-use future;
-use stream;
-use super::{Parameter, FileKey, Future};
-use cache;
-use icon; // TODO:
-use std::sync::Arc;
 
 fn fetch_value(
     log: Arc<TaggedLog>,
@@ -250,8 +247,6 @@ fn fetch_all(
     Box::new(f)
 }
 
-use super::TaggedLog;
-
 fn select_start_time<F, R>(
     log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F, try_timeout: std::time::Duration
 ) -> impl Future<Item=chrono::DateTime<chrono::Utc>, Error=String>
@@ -291,8 +286,6 @@ pub struct Forecast {
     pub snow_accum: Option<(f32, f32)>,
     pub snow_depth: Option<(f32)>,
 }
-
-use super::Stream;
 
 pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>) -> impl Stream<Item=Forecast, Error=String> {
 

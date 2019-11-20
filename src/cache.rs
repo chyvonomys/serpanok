@@ -1,6 +1,9 @@
-use super::FileKey;
-use icon;
+use super::{FileKey, TaggedLog};
+use crate::icon;
+use crate::grib;
 use std::sync::Arc;
+use lazy_static::*;
+use futures::{future, Future, stream, Stream};
 
 struct CacheEntry(String);
 
@@ -27,8 +30,6 @@ fn pickup_disk_cache() -> DiskCache<FileKey> {
 
     Arc::new(std::sync::Mutex::new(hm))
 }
-
-use futures::{future, Future, stream};
 
 type SharedFut<T> = future::Shared<Box<
     dyn Future<
@@ -110,9 +111,9 @@ fn simultaneous_fetch() {
     tokio::run(task);
 }
 
-use std::io::Write;
-
 fn save_to_file(bytes: &[u8], path: &str) -> Result<(), String> {
+    use std::io::Write;
+
     std::fs::File::create("tempfile") // TODO:
         .map_err(|e| format!("create tempfile failed: {}", e))
         .and_then(|f| {
@@ -126,8 +127,6 @@ fn save_to_file(bytes: &[u8], path: &str) -> Result<(), String> {
         })
 }
 
-use grib;
-
 fn parse_grib2(bytes: &[u8]) -> impl Future<Item=(grib::GribMessage, usize), Error=String> {
     let res = grib::parse_message(bytes)
         .map(move |m| (m.1, m.0.len()))
@@ -138,9 +137,6 @@ fn parse_grib2(bytes: &[u8]) -> impl Future<Item=(grib::GribMessage, usize), Err
         });
     future::result(res) // TODO:
 }
-
-use super::TaggedLog;
-use futures::Stream;
 
 fn download_grid_fut(
     log: Arc<TaggedLog>, icon_file: Arc<icon::IconFile>
@@ -200,11 +196,10 @@ fn download_grid_fut(
         })
 }
 
-use std::io::Read;
-
 fn make_fetch_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
 ) -> Box<dyn Future<Item=Arc<grib::GribMessage>, Error=String> + Send> {
+    use std::io::Read;
 
     let icon_file = Arc::new(icon::IconFile::new(file_key));
 

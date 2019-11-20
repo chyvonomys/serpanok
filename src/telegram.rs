@@ -1,4 +1,11 @@
+use serde_derive::{Serialize, Deserialize};
 use super::{http_get, http_post_json};
+use futures::{future, Future};
+use lazy_static::*;
+
+lazy_static! {
+    static ref BOTTOKEN: String = std::env::var("BOTTOKEN").expect("BOTTOKEN env");
+}
 
 #[derive(Debug)]
 pub enum TgChatType {
@@ -7,8 +14,6 @@ pub enum TgChatType {
     Supergroup,
     Channel,
 }
-
-use serde;
 
 impl<'de> serde::de::Deserialize<'de> for TgChatType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -219,12 +224,6 @@ impl TgInlineKeyboardButtonCB {
         Self {text, callback_data}
     }
 }
-
-lazy_static! {
-    static ref BOTTOKEN: String = std::env::var("BOTTOKEN").expect("BOTTOKEN env");
-}
-
-use futures::{future, Future};
 
 pub fn get_updates(last: Option<i32>) -> impl Future<Item=Vec<(Option<i32>, String)>, Error=String> {
     let mut url = format!("https://api.telegram.org/bot{}/getUpdates", BOTTOKEN.as_str());

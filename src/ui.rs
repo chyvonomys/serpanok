@@ -1,11 +1,12 @@
-use telegram;
-use super::{Future, Stream};
+use crate::telegram;
+use crate::format;
+use crate::data;
 use super::TaggedLog;
-use future;
-use stream;
+use futures::{future, Future, stream, Stream};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use chrono::{Datelike, Timelike, TimeZone};
+use lazy_static::*;
 
 lazy_static! {
     pub static ref SUBS: Arc<Mutex<HashMap<(i64, i32), Sub>>> = Arc::default();
@@ -108,6 +109,8 @@ run again for the same time, cache still has unfinished requests:
 
 QUESTION: will those requests ever finish?
 */
+
+use serde_derive::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Sub {
@@ -260,14 +263,11 @@ impl Future for UserInput {
     }
 }
 
-use data;
-use format;
-
-use itertools::Itertools; // group_by
-
 type Ymd = (i32, u32, u32);
 
 pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
+
+    use itertools::Itertools; // group_by
 
     let start00 = start.date().and_hms(0, 0, 0);
 

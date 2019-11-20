@@ -69,7 +69,7 @@ fn format_wind_dir(u: f32, v: f32) -> &'static str {
     }
 }
 
-use data;
+use crate::data;
 
 pub struct ForecastText(pub String);
 

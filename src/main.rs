@@ -1,21 +1,8 @@
-extern crate futures;
-extern crate tokio;
-extern crate chrono;
-extern crate itertools;
-#[macro_use] extern crate nom;
-extern crate bzip2;
-extern crate either;
-#[macro_use] extern crate lazy_static;
-extern crate hyper;
-extern crate hyper_tls;
-extern crate url;
-extern crate serde;
-extern crate serde_json;
-#[macro_use] extern crate serde_derive;
-extern crate regex;
-
 use std::io::Read;
 use chrono::{Datelike, TimeZone};
+use serde_derive::Serialize;
+use lazy_static::*;
+use futures::{future, Future, stream, Stream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Parameter {
@@ -96,8 +83,6 @@ fn unpack_bzip2(bytes: &[u8]) -> impl Future<Item=Vec<u8>, Error=String> {
         .map_err(|e| format!("unpack error: {:?}", e));
     future::result(res) // TODO:
 }
-
-use futures::{future, Future, stream, Stream};
 
 fn fold_response_body(resp: hyper::Response<hyper::Body>) -> impl Future<Item=(bool, Vec<u8>), Error=String> {
     let status = resp.status();

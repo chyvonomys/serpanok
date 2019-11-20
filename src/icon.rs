@@ -1,9 +1,7 @@
-use super::Parameter;
-use super::FileKey;
-use super::TaggedLog;
+use super::{Parameter, FileKey, TaggedLog};
 use super::{fetch_url, unpack_bzip2};
-use super::Future;
-use grib;
+use crate::grib;
+use futures::Future;
 
 pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
     let common = g.section4.product_def.common();
@@ -22,13 +20,12 @@ pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
     }
 }
 
-use itertools::Itertools; // step
 
 pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u8> {
     if mr % 6 == 0 {
         either::Either::Left(Iterator::chain(
             0u8..78,
-            (78..=120).step(3)
+            (78..=120).step_by(3)
         ))
     } else {
         either::Either::Right(0u8..=30)
@@ -36,11 +33,11 @@ pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u8> {
 }
 
 pub fn icon_modelrun_iter() -> impl Iterator<Item=u8> {
-    (0u8..=21).step(3)
+    (0u8..=21).step_by(3)
 }
 
 pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
-    lazy_static! {
+    lazy_static::lazy_static! {
         static ref RE: regex::Regex = regex::Regex::new(
             r"^icon-eu_europe_regular-lat-lon_single-level_(\d{4})(\d{2})(\d{2})(\d{2})_(\d{3})_([0-9_A-Z]+).grib2$"
         ).unwrap();
