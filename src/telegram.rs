@@ -1,9 +1,8 @@
 use serde_derive::{Serialize, Deserialize};
 use super::{http_get, http_post_json};
-use futures::{future, Future};
-use lazy_static::*;
+use futures::{future, Future, TryFutureExt};
 
-lazy_static! {
+lazy_static::lazy_static! {
     static ref BOTTOKEN: String = std::env::var("BOTTOKEN").expect("BOTTOKEN env");
 }
 
@@ -225,14 +224,14 @@ impl TgInlineKeyboardButtonCB {
     }
 }
 
-pub fn get_updates(last: Option<i32>) -> impl Future<Item=Vec<(Option<i32>, String)>, Error=String> {
+pub fn get_updates(last: Option<i32>) -> impl Future<Output=Result<Vec<(Option<i32>, String)>, String>> {
     let mut url = format!("https://api.telegram.org/bot{}/getUpdates", BOTTOKEN.as_str());
     if let Some(x) = last {
         url.push_str("?offset=");
         url.push_str(&(x+1).to_string());
     }
 
-    http_get(url).and_then(|(ok, body)| future::result(
+    http_get(url).and_then(|(ok, body)| future::ready(
         if ok {
             serde_json::from_slice::<TgResponse< Vec<serde_json::Value>> >(&body)
                 .map_err(|e| format!("parse updates error: {}", e.to_string()))
@@ -247,11 +246,11 @@ pub fn get_updates(last: Option<i32>) -> impl Future<Item=Vec<(Option<i32>, Stri
     ))
 }
 
-pub fn tg_call<S, R>(call: &'static str, payload: S) -> impl Future<Item=R, Error=String>
+pub fn tg_call<S, R>(call: &'static str, payload: S) -> impl Future<Output=Result<R, String>>
 where S: serde::Serialize, R: serde::de::DeserializeOwned {
     let url = format!("https://api.telegram.org/bot{}/{}", BOTTOKEN.as_str(), call);
     let json = serde_json::to_string(&payload).unwrap();
-    http_post_json(url, json).and_then(|(ok, body)| future::result(
+    http_post_json(url, json).and_then(|(ok, body)| future::ready(
         if ok {
             serde_json::from_reader::<_, TgResponse<R>>(std::io::Cursor::new(body))
                 .map_err(|e| format!("parse response error: {}", e.to_string()))

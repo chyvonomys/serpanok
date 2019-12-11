@@ -1,7 +1,7 @@
 use super::{Parameter, FileKey, TaggedLog};
 use super::{fetch_url, unpack_bzip2};
 use crate::grib;
-use futures::Future;
+use futures::{Future, TryFutureExt};
 
 pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
     let common = g.section4.product_def.common();
@@ -106,7 +106,8 @@ impl IconFile {
     }
 
     // ICON specific: download and unpack
-    pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Item=Vec<u8>, Error=String> {
+
+    pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<Vec<u8>, String>> {
         fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename))
             .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
     }

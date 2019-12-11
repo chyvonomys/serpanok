@@ -4,7 +4,7 @@ use crate::icon; // TODO:
 use crate::grib;
 use std::sync::Arc;
 use chrono::Timelike;
-use futures::{stream, Stream, future, Future};
+use futures::{stream, Stream, future, Future, TryFutureExt};
 use itertools::Itertools; // tuple_windows, collect_vec
 
 pub trait Timeseries {
@@ -147,7 +147,7 @@ fn fetch_value(
     lat: f32, lon: f32,
     modelrun: ModelrunSpec,
     timestep: u8,
-) -> impl Future<Item=f32, Error=String> {
+) -> impl Future<Output=Result<f32, String>> {
 
     let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
     cache::fetch_grid(log, file_key)
@@ -162,12 +162,12 @@ fn fetch_value(
         .map_err(|e| format!("fetch_value error: {}", e))
 }
 
-fn opt_wrap<FN, F, I>(b: bool, f: FN) -> impl Future<Item=Option<I>, Error=String>
-where FN: FnOnce() -> F, F: Future<Item=I, Error=String> {
+fn opt_wrap<FN, F, I>(b: bool, f: FN) -> impl Future<Output=Result<Option<I>, String>>
+where FN: FnOnce() -> F, F: Future<Output=Result<I, String>> {
     if b {
-        future::Either::A(f().map(Some))
+        future::Either::Left(f().map(Some))
     } else {
-        future::Either::B(future::ok(None))
+        future::Either::Right(future::ok(None))
     }
 }
 
@@ -198,7 +198,7 @@ impl ParameterFlags {
 
 fn fetch_all(
     log: Arc<TaggedLog>, lat: f32, lon: f32, mr: ModelrunSpec, t0: TimestepSpec, t1: TimestepSpec, params: ParameterFlags
-) -> Box<dyn Future<Item=Forecast, Error=String> + Send> {
+) -> Box<dyn Future<Output=Result<Forecast, String>> + Send> {
 
     let log1 = log.clone();
     let log2 = log.clone();
@@ -207,25 +207,25 @@ fn fetch_all(
     let log5 = log.clone();
     let ts = t0.1;
     let ts1 = t1.1;
-    let f = future::Future::join4(
+    let f = future::FutureExt::join4(
         fetch_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
         opt_wrap(params.tcc, move || fetch_value(log1, Parameter::TotalCloudCover, lat, lon, mr, ts)),
-        opt_wrap(params.wind, move || future::Future::join(
+        opt_wrap(params.wind, move || future::FutureExt::join(
             fetch_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
             fetch_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
         )),
-        future::Future::join4(
-            opt_wrap(params.precip, move || future::Future::join(
+        future::FutureExt::join4(
+            opt_wrap(params.precip, move || future::FutureExt::join(
                 fetch_value(log3.clone(), Parameter::TotalAccumPrecip, lat, lon, mr, ts),
                 fetch_value(log3, Parameter::TotalAccumPrecip, lat, lon, mr, ts1),
             )),
-            opt_wrap(params.rain, move || future::Future::join4(
+            opt_wrap(params.rain, move || future::FutureExt::join4(
                 fetch_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts),
                 fetch_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts1),
                 fetch_value(log4.clone(), Parameter::ConvectiveRain, lat, lon, mr, ts),
                 fetch_value(log4, Parameter::ConvectiveRain, lat, lon, mr, ts1),
             )),
-            opt_wrap(params.snow, move || future::Future::join4(
+            opt_wrap(params.snow, move || future::FutureExt::join4(
                 fetch_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts),
                 fetch_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts1),
                 fetch_value(log5.clone(), Parameter::ConvectiveSnow, lat, lon, mr, ts),
@@ -249,10 +249,10 @@ fn fetch_all(
 
 fn select_start_time<F, R>(
     log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F, try_timeout: std::time::Duration
-) -> impl Future<Item=chrono::DateTime<chrono::Utc>, Error=String>
+) -> impl Future<Output=Result<chrono::DateTime<chrono::Utc>, String>>
 where
     F: Fn(Arc<TaggedLog>, (chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8)) -> R,
-    R: Future<Item=Forecast, Error=String>,
+    R: Future<Output=Result<Forecast, String>>,
 {
     let now = chrono::Utc::now();
     let start_time = now - chrono::Duration::hours(12);
@@ -265,7 +265,7 @@ where
             let log = log.clone();
             tokio::timer::Timeout::new(try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)), try_timeout)
                 .map(move |_f: Forecast| Some(mrt))
-                .or_else(move |e: tokio::timer::timeout::Error<String>| {
+                .or_else(move |e: tokio::timer::timeout::Elapsed| {
                     log.add_line(&format!("took too long, {}, {:?}", e, try_timeout));
                     future::ok(None)
                 })
@@ -287,7 +287,7 @@ pub struct Forecast {
     pub snow_depth: Option<(f32)>,
 }
 
-pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>) -> impl Stream<Item=Forecast, Error=String> {
+pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>) -> impl Stream<Item=Result<Forecast, String>> {
 
     select_start_time(
         log.clone(), target_time,
@@ -295,7 +295,7 @@ pub fn forecast_stream(log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chr
         std::time::Duration::from_secs(7)
     )
         .map(move |f| {
-            stream::iter_ok(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
+            stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter).map(Ok))
                 .and_then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
                     log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
                     fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), ParameterFlags::default1())
