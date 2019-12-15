@@ -38,7 +38,7 @@ fn iter_cancel<S, I, SE, CE, CFn, CFt>(init: I, mut s: S, mut cf: CFn) -> impl S
     )
 }
 
-pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, String>> + Send> {
+pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, String>> + Send + Unpin> {
     let key = (sub.chat_id, sub.widget_message_id);
     {
         let mut hm = SUBS.lock().unwrap();
@@ -54,7 +54,7 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, Str
     let once = sub.name.is_none();
     let fts = data::forecast_stream(log.clone(), sub.latitude, sub.longitude, sub.target_time)
         .map_ok(move |f| format::format_forecast(sub.name.as_ref().map(String::as_ref), &f))
-        .inspect({
+        .inspect_ok({
             let log = log.clone();
             move |format::ForecastText(upd)| log.add_line(&format!("{}: {}", if once {"single update"} else {"update"}, upd))
         });
@@ -89,7 +89,7 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, Str
                 None
             ).map_ok(move |_msg_id| n)
         })
-        .inspect(move |n| log.add_line(&format!("done: {} updates", n)))
+        .inspect_ok(move |n| log.add_line(&format!("done: {} updates", n)))
         .map_err(|e| format!("subscription future error: {}", e))
         .then(move |x| {SUBS.lock().unwrap().remove(&key); future::ready(x)});
 
@@ -187,7 +187,7 @@ fn make_cancel_row() -> Vec<telegram::TgInlineKeyboardButtonCB>{
 struct UserClick {
     chat_id: i64,
     msg_id: i32,
-    rx: Box<dyn Future<Output=Result<String, String>> + Send>,
+    rx: Box<dyn Future<Output=Result<String, String>> + Send + Unpin>,
 } 
 
 impl UserClick {
@@ -219,13 +219,13 @@ impl Drop for UserClick {
 impl Future for UserClick {
     type Output = Result<String, String>;
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
-        self.rx.poll(cx)
+        self.rx.poll_unpin(cx)
     }
 }
 
 struct UserInput {
     chat_id: i64,
-    rx: Box<dyn Future<Output=Result<String, String>> + Send>,
+    rx: Box<dyn Future<Output=Result<String, String>> + Send + Unpin>,
 }
 
 impl UserInput {
@@ -257,7 +257,7 @@ impl Drop for UserInput {
 impl Future for UserInput {
     type Output = Result<String, String>;
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
-        self.rx.poll(cx)
+        self.rx.poll_unpin(cx)
     }
 }
 
@@ -402,10 +402,10 @@ fn process_widget(
                 let text = format!("{}\nдай назву цьому спостереженню:", widget_text);
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), Some(keyboard))
-                    .and_then(move |()| futures::future::select(
+                    .and_then(move |()| futures::future::try_select(
                             UserInput::new(chat_id).map_ok(move |name| Some((target_time, Some(name)))),
                             UserClick::new(chat_id, msg_id).map_ok(move |_| None)
-                        ).map_ok(move |(x, _)| (widget_text, msg_id, x)).map_err(|(x, _)| x)
+                        ).map_ok(move |e| (widget_text, msg_id, e.factor_first())).map_err(|e| e.factor_first())
                     );
                 future::Either::Left(future::Either::Right(f))
             },
@@ -447,7 +447,7 @@ fn process_widget(
         })
 }
 
-pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Output=Result<(), String>> + Send> {
+pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
     process_bot(SeUpdate::from(tgu))
 }
 
@@ -467,7 +467,7 @@ static TEXT_ERROR_MSG: &str = "я не розумію";
 // TODO2:  what if user blocks bot?
 
 // NOTE: allow only private chat communication for now
-fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Send> {
+fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
     match upd {
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>

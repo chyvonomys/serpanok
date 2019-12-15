@@ -146,17 +146,17 @@ fn stream_with_cancel() {
     let start = std::time::Instant::now();
     let s = stream::iter(FS.iter().cloned().map(Ok))
         .and_then(move |(secs, res)|
-            tokio::timer::Delay::new(start + std::time::Duration::from_secs(secs))
-                .map_err(|e| format!("timer error: {}", e.to_string()))
-                .and_then(move |()| future::ready::<usize, &'static str>(res).map_err(|e| e.to_owned()))
+            tokio::timer::delay(start + std::time::Duration::from_secs(secs))
+                .map(move |()| res.map_err(|e| e.to_owned()))
         )
-        .inspect(|v| println!("v -> {}", v));
+        .inspect_ok(|v| println!("v -> {}", v));
 
     let t = s
-        .fold( (), |(), _| future::ok::<_, String>( () ))
-        .map_err(|e| println!("stream error: {}", e));
+        .try_fold( (), |(), _| future::ok::<_, String>( () ))
+        .map_err(|e| println!("stream error: {}", e))
+        .map(|_| ());
     
-    tokio::run(t);
+    tokio::spawn(t);
 }
 
 struct SerpanokApi {
@@ -179,10 +179,10 @@ fn serpanok_api(
     match (req.method(), req.uri().path()) {
         (&hyper::Method::POST, "/bot") => {
             let f = req.into_body()
-                .fold(Vec::new(), |mut acc, x| {acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc)}) // -> Future<vec, hyper>
+                .try_fold(Vec::new(), |mut acc, x| {acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc)}) // -> Future<vec, hyper>
                 .and_then(move |body| {
                     match serde_json::from_slice::<telegram::TgUpdate>(&body) {
-                        Ok(tgu) => exec.spawn(ui::process_update(tgu).map_err(|e| println!("process update error: {}", e))),
+                        Ok(tgu) => exec.spawn(ui::process_update(tgu).map_err(|e| println!("process update error: {}", e)).map(|_| ())),
                         Err(err) => println!("TgUpdate parse error: {}", err.to_string()),
                     }
                     future::ok( () )
@@ -224,7 +224,7 @@ fn serpanok_api(
         },
         (&hyper::Method::POST, "/subs") => {
             let f = req.into_body()
-                .fold(Vec::new(), |mut acc, x| {acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc)}) // -> Future<vec, hyper>
+                .try_fold(Vec::new(), |mut acc, x| {acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc)}) // -> Future<vec, hyper>
                 .and_then(move |body| {
                     let r = serde_json::from_slice::<Vec<ui::Sub>>(&body)
                         .map(|ss| {
@@ -240,8 +240,9 @@ fn serpanok_api(
                                  */
                                 exec.spawn(
                                     ui::monitor_weather_wrap(s.clone())
-                                        .map(|_| ())
+                                        .map_ok(|_| ())
                                         .map_err(|err| println!("restored sub err: {}", err))
+                                        .map(|_| ())
                                 );
                             }
                             (200, "registered".to_owned())
@@ -296,7 +297,7 @@ fn serpanok_api(
     }
 }
 
-fn forward_updates(url: String) -> impl Future<Output=Result<(), ()>> {
+fn forward_updates(url: String) -> impl Future<Output=()> {
     stream::iter(0..)
         .then(|_i|
             tokio::timer::delay_for(std::time::Duration::from_secs(3)).map(Ok)
@@ -320,6 +321,7 @@ fn forward_updates(url: String) -> impl Future<Output=Result<(), ()>> {
         )
         .map_ok(|_| ())
         .map_err(|e| println!("poll stream error: {}", e.to_string()))
+        .map(|_| ())
 }
 
 fn main() {
@@ -339,13 +341,11 @@ fn main() {
     println!("---> http://{}/", addr_str);
     let purge_mem_cache = tokio::timer::Interval::new_interval(std::time::Duration::from_secs(60))
         .map(|_| cache::purge_mem_cache())
-        .map_err(|e| println!("purge mem interval error: {}", e.to_string()))
-        .fold((), |_, _| Ok(()));
+        .fold((), |_, _| future::ready( () ));
 
     let purge_disk_cache = tokio::timer::Interval::new_interval(std::time::Duration::from_secs(60 * 5))
         .map(|_| cache::purge_disk_cache())
-        .map_err(|e| println!("purge disk interval error: {}", e.to_string()))
-        .fold((), |_, _| Ok(()));
+        .fold((), |_, _| future::ready( () ));
 
     rt.spawn(server);
 
@@ -353,5 +353,5 @@ fn main() {
     rt.spawn(purge_mem_cache);
     rt.spawn(purge_disk_cache);
 
-    rt.shutdown_on_idle().wait().unwrap();
+    rt.shutdown_on_idle();
 }

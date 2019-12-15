@@ -3,7 +3,7 @@ use crate::icon;
 use crate::grib;
 use std::sync::Arc;
 use lazy_static::*;
-use futures::{future, Future, FutureExt, TryFutureExt, stream, Stream};
+use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
 struct CacheEntry(String);
 
@@ -96,16 +96,16 @@ fn simultaneous_fetch() {
     let key = FileKey::test_new();
     let log = Arc::new(TaggedLog {tag: "test".to_owned()});
 
-    let task = Future::join4(
+    let task = future::try_join4(
         fetch_grid(log.clone(), key.clone()),
         fetch_grid(log.clone(), key.clone()),
         fetch_grid(log.clone(), key.clone()),
         fetch_grid(log.clone(), key.clone()),
     )
-    .map(|_| ())
+    .map_ok(|_| ())
     .map_err(|e| println!("error: {}", e));
 
-    tokio::run(task);
+    tokio::spawn(task.map(|_| ()));
 }
 
 fn save_to_file(bytes: &[u8], path: &str) -> Result<(), String> {
@@ -165,8 +165,8 @@ fn download_grid_fut(
                 .map(move |i| from + chrono::Duration::minutes(i * 10))
                 .take_while(move |t| *t < to);
 
-            stream::iter(attempt_schedule.map(Ok))
-                .and_then({ let log = log.clone(); move |t| {
+            stream::iter(attempt_schedule)
+                .then({ let log = log.clone(); move |t| {
                     let now = chrono::Utc::now();
                     log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339(), now.to_rfc3339()));
                     let wait = if t > now {
@@ -178,15 +178,14 @@ fn download_grid_fut(
                     // TODO: skip 0-wait?
 
                     tokio::timer::delay_for(wait.to_std().unwrap())
-                        .map_err(|e| format!("delay error: {}", e)) // TODO: mixed errors, some are acceptable for retry, other not
-                        .and_then({
+                        .then({
                             let log = log.clone(); let icon_file = icon_file.clone();
                             move |_| icon_file.fetch_bytes(log)
                         })
                 }})
                 .inspect_err(move |e| log.add_line(&format!("inspect err: {}", e)))
                 .then(future::ok) // stream of vec --> stream of results
-                .filter_map(|item: Result<Vec<u8>, String>| item.ok())
+                .filter_map(|item: Result<Vec<u8>, String>| future::ready(item.ok()))
                 .into_future()
                 .map_err(|x: (String, _)| x.0)
                 .and_then(|x: (Option<Vec<u8>>, _)| future::ready(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
@@ -195,7 +194,7 @@ fn download_grid_fut(
 
 fn make_fetch_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
-) -> Box<dyn Future<Output=Result<Arc<grib::GribMessage>, String>> + Send> {
+) -> Box<dyn Future<Output=Result<Arc<grib::GribMessage>, String>> + Send + Unpin> {
     use std::io::Read;
 
     let icon_file = Arc::new(icon::IconFile::new(file_key));
