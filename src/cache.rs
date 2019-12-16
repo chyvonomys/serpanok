@@ -184,11 +184,9 @@ fn download_grid_fut(
                         })
                 }})
                 .inspect_err(move |e| log.add_line(&format!("inspect err: {}", e)))
-                .then(future::ok) // stream of vec --> stream of results
                 .filter_map(|item: Result<Vec<u8>, String>| future::ready(item.ok()))
                 .into_future()
-                .map_err(|x: (String, _)| x.0)
-                .and_then(|x: (Option<Vec<u8>>, _)| future::ready(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
+                .then(|x: (Option<Vec<u8>>, _)| future::ready(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
         })
 }
 

@@ -2,7 +2,7 @@ use std::io::Read;
 use chrono::{Datelike, TimeZone};
 use serde_derive::Serialize;
 use lazy_static::*;
-use futures::{future, Future, FutureExt, TryFutureExt, stream, Stream, StreamExt, TryStreamExt};
+use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Parameter {
@@ -170,7 +170,7 @@ where T: Into<hyper::Body> {
 
 fn serpanok_api(
     exec: tokio::runtime::TaskExecutor, req: hyper::Request<hyper::Body>
-) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send> {
+) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send + Unpin> {
     println!("request: {} {}", req.method(), req.uri());
     let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
     let params: std::collections::HashMap<String, String> =
@@ -331,8 +331,9 @@ fn main() {
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.executor();
 
-    let new_service = hyper::service::make_service_fn(move || {
-        hyper::service::service_fn(move |req| serpanok_api(exec, req))
+    let new_service = hyper::service::make_service_fn(move |_| {
+        let sfn = hyper::service::service_fn(move |req| serpanok_api(exec, req));
+        future::ok(sfn)
     });
 
     let addr = ([127, 0, 0, 1], 8778).into();
@@ -347,7 +348,7 @@ fn main() {
         .map(|_| cache::purge_disk_cache())
         .fold((), |_, _| future::ready( () ));
 
-    rt.spawn(server);
+    rt.spawn(server.map(|_| ()));
 
     rt.spawn(forward_updates(format!("http://{}/bot", addr_str)));
     rt.spawn(purge_mem_cache);
