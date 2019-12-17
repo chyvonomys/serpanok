@@ -252,31 +252,30 @@ fn select_start_time<F, R>(
 ) -> impl Future<Output=Result<chrono::DateTime<chrono::Utc>, String>>
 where
     F: Fn(Arc<TaggedLog>, (chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8)) -> R,
-    R: Future<Output=Result<Forecast, String>>,
+    R: Future<Output=Result<Forecast, String>> + Unpin,
 {
     let now = chrono::Utc::now();
     let start_time = now - chrono::Duration::hours(12);
     let fs: Vec<_> = forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter).collect();
 
-    stream::unfold(fs, |mut fs| fs.pop().map(|x| future::ok( (x, fs) )))
-        .skip_while(move |(mrt, _, _, _, _, _)| future::ok(now < *mrt))
-        .and_then(move |(mrt, mr, ft, ts, ft1, ts1)| {
+    stream::unfold(fs, |mut fs| future::ready( fs.pop().map(|x| (x, fs)) ) )
+        .skip_while(move |(mrt, _, _, _, _, _)| future::ready(now < *mrt))
+        .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
             log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
             let log = log.clone();
             tokio::timer::Timeout::new(try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)), try_timeout)
                 .then(move |v: Result<Result<Forecast, String>, tokio::timer::timeout::Elapsed>| {
                     let res = match v {
-                        Ok(Ok(f)) => Some(f),
+                        Ok(Ok(_f)) => Some(mrt),
                         Ok(Err(s)) => { log.add_line(&format!("failed with: {}", s)); None },
                         Err(e) => { log.add_line(&format!("took too long, {}, {:?}", e, try_timeout)); None },
                     };
                     future::ready(res)
                 })
         })
-        .filter_map(|item: Option<chrono::DateTime<chrono::Utc>>| item)
+        .filter_map(|item: Option<chrono::DateTime<chrono::Utc>>| future::ready(item))
         .into_future()
-        .map_err(|(e, _)| e)
-        .and_then(|(f, _)| f.ok_or_else(|| "tried all start times".to_string()))
+        .map(|(f, _)| f.ok_or_else(|| "tried all start times".to_string()))
 }
 
 pub struct Forecast {
@@ -309,5 +308,5 @@ pub fn forecast_stream(
                 .then(future::ok) // stream of values --> stream of results
                 .filter_map(|item: Result<_, String>| future::ready(item.ok())) // drop errors
         })
-        .flatten_stream()
+        .try_flatten_stream()
 }

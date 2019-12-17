@@ -159,10 +159,6 @@ fn stream_with_cancel() {
     tokio::spawn(t);
 }
 
-struct SerpanokApi {
-    executor: tokio::runtime::TaskExecutor,
-}
-
 fn hresp<T>(code: u16, t: T) -> hyper::Response<hyper::Body>
 where T: Into<hyper::Body> {
     hyper::Response::builder().status(code).body(t.into()).unwrap()
@@ -328,12 +324,13 @@ fn main() {
 
     //println!("pick up cache: {} entries", cache::DISK_CACHE.lock().unwrap().len());
 
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.executor();
 
     let new_service = hyper::service::make_service_fn(move |_| {
-        let sfn = hyper::service::service_fn(move |req| serpanok_api(exec, req));
-        future::ok(sfn)
+        let exec = exec.clone();
+        let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
+        future::ok::<_, hyper::Error>(sfn)
     });
 
     let addr = ([127, 0, 0, 1], 8778).into();

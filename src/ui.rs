@@ -218,7 +218,7 @@ impl Drop for UserClick {
 
 impl Future for UserClick {
     type Output = Result<String, String>;
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
         self.rx.poll_unpin(cx)
     }
 }
@@ -256,7 +256,7 @@ impl Drop for UserInput {
 
 impl Future for UserInput {
     type Output = Result<String, String>;
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context) -> futures::task::Poll<Self::Output>{
         self.rx.poll_unpin(cx)
     }
 }
@@ -402,11 +402,14 @@ fn process_widget(
                 let text = format!("{}\nдай назву цьому спостереженню:", widget_text);
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), Some(keyboard))
-                    .and_then(move |()| futures::future::try_select(
+                    .and_then(move |()| {
+                        futures::future::try_select(
                             UserInput::new(chat_id).map_ok(move |name| Some((target_time, Some(name)))),
                             UserClick::new(chat_id, msg_id).map_ok(move |_| None)
-                        ).map_ok(move |e| (widget_text, msg_id, e.factor_first())).map_err(|e| e.factor_first())
-                    );
+                        )
+                            .map_ok(move |e| (widget_text, msg_id, e.factor_first().0))
+                            .map_err(|e| e.factor_first().0)
+                    });
                 future::Either::Left(future::Either::Right(f))
             },
             None => future::Either::Right(future::ok((widget_text, msg_id, None))),
