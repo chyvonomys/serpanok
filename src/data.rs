@@ -263,8 +263,8 @@ where
         .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
             log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
             let log = log.clone();
-            tokio::timer::Timeout::new(try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)), try_timeout)
-                .then(move |v: Result<Result<Forecast, String>, tokio::timer::timeout::Elapsed>| {
+            tokio::time::timeout(try_timeout, try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)))
+                .then(move |v: Result<Result<Forecast, String>, tokio::time::Elapsed>| {
                     let res = match v {
                         Ok(Ok(_f)) => Some(mrt),
                         Ok(Err(s)) => { log.add_line(&format!("failed with: {}", s)); None },

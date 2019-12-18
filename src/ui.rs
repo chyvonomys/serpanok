@@ -22,7 +22,7 @@ fn iter_cancel<S, I, SE, CE, CFn, CFt>(init: I, mut s: S, mut cf: CFn) -> impl S
     let mut prev = Some(init);
 
     stream::poll_fn(
-        move |cx| -> futures::Poll<Option<Result<I, SE>>> {
+        move |cx| -> futures::task::Poll<Option<Result<I, SE>>> {
             match cancel_fut.poll_unpin(cx) {
                 futures::task::Poll::Ready(Ok(())) => futures::task::Poll::Ready(None),
                 futures::task::Poll::Pending | futures::task::Poll::Ready(Err(_)) => {

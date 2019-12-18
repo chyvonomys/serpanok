@@ -177,7 +177,7 @@ fn download_grid_fut(
 
                     // TODO: skip 0-wait?
 
-                    tokio::timer::delay_for(wait.to_std().unwrap())
+                    tokio::time::delay_for(wait.to_std().unwrap())
                         .then({
                             let log = log.clone(); let icon_file = icon_file.clone();
                             move |_| icon_file.fetch_bytes(log)

@@ -130,7 +130,7 @@ fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=
 
 lazy_static! {
     static ref HTTP_CLIENT: hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body> = hyper::Client::builder()
-        .build::<_, hyper::Body>(hyper_tls::HttpsConnector::new().expect("TLS init failed"));
+        .build::<_, hyper::Body>(hyper_tls::HttpsConnector::new());
 }
 
 #[test]
@@ -143,10 +143,10 @@ fn stream_with_cancel() {
         (25, Ok(4))
     ];
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let s = stream::iter(FS.iter().cloned().map(Ok))
         .and_then(move |(secs, res)|
-            tokio::timer::delay(start + std::time::Duration::from_secs(secs))
+            tokio::time::delay_until(start + std::time::Duration::from_secs(secs))
                 .map(move |()| res.map_err(|e| e.to_owned()))
         )
         .inspect_ok(|v| println!("v -> {}", v));
@@ -165,7 +165,7 @@ where T: Into<hyper::Body> {
 }
 
 fn serpanok_api(
-    exec: tokio::runtime::TaskExecutor, req: hyper::Request<hyper::Body>
+    exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>
 ) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send + Unpin> {
     println!("request: {} {}", req.method(), req.uri());
     let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
@@ -178,7 +178,9 @@ fn serpanok_api(
                 .try_fold(Vec::new(), |mut acc, x| {acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc)}) // -> Future<vec, hyper>
                 .and_then(move |body| {
                     match serde_json::from_slice::<telegram::TgUpdate>(&body) {
-                        Ok(tgu) => exec.spawn(ui::process_update(tgu).map_err(|e| println!("process update error: {}", e)).map(|_| ())),
+                        Ok(tgu) => { exec.spawn(
+                            ui::process_update(tgu).map_err(|e| println!("process update error: {}", e)).map(|_| ())
+                        ); },
                         Err(err) => println!("TgUpdate parse error: {}", err.to_string()),
                     }
                     future::ok( () )
@@ -296,7 +298,7 @@ fn serpanok_api(
 fn forward_updates(url: String) -> impl Future<Output=()> {
     stream::iter(0..)
         .then(|_i|
-            tokio::timer::delay_for(std::time::Duration::from_secs(3)).map(Ok)
+            tokio::time::delay_for(std::time::Duration::from_secs(3)).map(Ok)
         )
         .try_fold(None, move |last_id, ()|
             telegram::get_updates(last_id)
@@ -321,35 +323,32 @@ fn forward_updates(url: String) -> impl Future<Output=()> {
 }
 
 fn main() {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let exec = rt.handle().clone();
 
-    //println!("pick up cache: {} entries", cache::DISK_CACHE.lock().unwrap().len());
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let exec = rt.executor();
-
-    let new_service = hyper::service::make_service_fn(move |_| {
-        let exec = exec.clone();
-        let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
-        future::ok::<_, hyper::Error>(sfn)
+    rt.block_on(async move {
+        let new_service = hyper::service::make_service_fn({ let exec = exec.clone(); move |_| {
+            let exec = exec.clone();
+            let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
+            future::ok::<_, hyper::Error>(sfn)
+        }});
+    
+        let addr = ([127, 0, 0, 1], 8778).into();
+        let server = hyper::Server::bind(&addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
+        let addr_str = addr.to_string();
+        println!("---> http://{}/", addr_str);
+        let purge_mem_cache = tokio::time::interval(std::time::Duration::from_secs(60))
+            .map(|_| cache::purge_mem_cache())
+            .fold((), |_, _| future::ready( () ));
+    
+        let purge_disk_cache = tokio::time::interval(std::time::Duration::from_secs(60 * 5))
+            .map(|_| cache::purge_disk_cache())
+            .fold((), |_, _| future::ready( () ));
+    
+        exec.spawn(server.map(|_| ()));
+        exec.spawn(purge_mem_cache);
+        exec.spawn(purge_disk_cache);
+    
+        forward_updates(format!("http://{}/bot", addr_str)).await
     });
-
-    let addr = ([127, 0, 0, 1], 8778).into();
-    let server = hyper::Server::bind(&addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
-    let addr_str = addr.to_string();
-    println!("---> http://{}/", addr_str);
-    let purge_mem_cache = tokio::timer::Interval::new_interval(std::time::Duration::from_secs(60))
-        .map(|_| cache::purge_mem_cache())
-        .fold((), |_, _| future::ready( () ));
-
-    let purge_disk_cache = tokio::timer::Interval::new_interval(std::time::Duration::from_secs(60 * 5))
-        .map(|_| cache::purge_disk_cache())
-        .fold((), |_, _| future::ready( () ));
-
-    rt.spawn(server.map(|_| ()));
-
-    rt.spawn(forward_updates(format!("http://{}/bot", addr_str)));
-    rt.spawn(purge_mem_cache);
-    rt.spawn(purge_disk_cache);
-
-    rt.shutdown_on_idle();
 }
