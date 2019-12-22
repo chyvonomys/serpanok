@@ -173,8 +173,21 @@ fn tg_answer_cbq(id: String, notification: Option<String>) -> impl Future<Output
 type MsgId = (i64, i32);
 
 lazy_static! {
-    pub static ref USER_CLICKS: Arc<Mutex<HashMap<MsgId, futures::channel::oneshot::Sender<String>>>> = Arc::default();
-    pub static ref USER_INPUTS: Arc<Mutex<HashMap<i64, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+    static ref USER_CLICKS: Arc<Mutex<HashMap<MsgId, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+    static ref USER_INPUTS: Arc<Mutex<HashMap<i64, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+}
+
+#[derive(Serialize)]
+pub struct UiStats {
+    buttons: Vec<MsgId>,
+    inputs: Vec<i64>,
+}
+
+pub fn stats() -> UiStats {
+    return UiStats {
+        buttons: USER_CLICKS.lock().unwrap().keys().cloned().collect(),
+        inputs: USER_INPUTS.lock().unwrap().keys().cloned().collect(),
+    }
 }
 
 const PADDING_DATA: &str = "na";

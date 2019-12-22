@@ -298,9 +298,7 @@ fn serpanok_api(
             Box::new(f)
         },
         (&hyper::Method::GET, "/uis") => {
-            let cs: Vec<(i64, i32)> = ui::USER_CLICKS.lock().unwrap().keys().cloned().collect();
-            let is: Vec<i64> = ui::USER_INPUTS.lock().unwrap().keys().cloned().collect();
-            let f = future::ready(serde_json::to_string_pretty(&(cs, is)))
+            let f = future::ready(serde_json::to_string_pretty(&ui::stats()))
                 .and_then(|json| future::ok(hresp(200, json, "application/json")))
                 .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
