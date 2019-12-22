@@ -123,15 +123,16 @@ fn simultaneous_fetch() {
 fn save_to_file(bytes: &[u8], path: &str) -> Result<(), String> {
     use std::io::Write;
 
-    std::fs::File::create(format!("{}.temp", path)) // TODO:
+    let tempname = format!("{}.temp", path);
+    std::fs::File::create(&tempname) // TODO:
         .map_err(|e| format!("create tempfile failed: {}", e))
         .and_then(|f| {
             std::io::BufWriter::new(f)
                 .write_all(bytes)
                 .map_err(|e| format!("write to tempfile failed: {}", e))
         })
-        .and_then(|()| {
-            std::fs::rename("tempfile", path)
+        .and_then(move |()| {
+            std::fs::rename(tempname, path)
                 .map_err(|e| format!("rename failed: {:?}", e))
         })
 }
