@@ -257,26 +257,57 @@ fn serpanok_api(
             Box::new(f)
         },
         (&hyper::Method::GET, "/picker") => {
-            let start = params.get("start")
+            let start_utc = params.get("start")
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                 .map(|f| f.into())
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
-            let days = ui::time_picker(start);
-            let mut result = format!("start={}, lon={}, lat={}\n", start.to_rfc3339(), lon, lat);
-            for day in days {
+            let days_utc = ui::time_picker(start_utc);
+            let start_kyiv = chrono_tz::Europe::Kiev.from_utc_datetime(&start_utc.naive_utc());
+            let days_kyiv = ui::time_picker(start_kyiv);
+
+            let mut left = String::new();
+            for day in days_utc {
                 let (y, m, d) = day.0;
-                result.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
+                left.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
                 for row in day.1 {
                     for col in row {
                         if let Some(h) = col {
-                            result.push_str(&format!(" {:02} ", h));
+                            left.push_str(&format!(" {:02} ", h));
                         } else {
-                            result.push_str(" -- ");
+                            left.push_str(" -- ");
                         }
                     }
-                    result.push_str("\n");
+                    left.push_str("\n");
+                }
+            }
+
+            let mut right = String::new();
+            for day in days_kyiv {
+                let (y, m, d) = day.0;
+                right.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
+                for row in day.1 {
+                    for col in row {
+                        if let Some(h) = col {
+                            right.push_str(&format!(" {:02} ", h));
+                        } else {
+                            right.push_str(" -- ");
+                        }
+                    }
+                    right.push_str("\n");
+                }
+            }
+
+            let mut result = format!("startUtc={}, startKyiv={}, lon={}, lat={}\n", start_utc.to_rfc3339(), start_kyiv.to_rfc3339(), lon, lat);
+            let mut l = left.split("\n");
+            let mut r = right.split("\n");
+            loop {
+                match (l.next(), r.next()) {
+                    (Some(a), Some(b)) => result.push_str(&format!("{:<25} {}\n", a, b)),
+                    (Some(a), None) => result.push_str(&format!("{:<25}\n", a)),
+                    (None, Some(b)) => result.push_str(&format!("{:<25} {}\n", "", b)),
+                    _ => break,
                 }
             }
             Box::new(future::ok(hresp(200, result, "text/plain")))

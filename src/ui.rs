@@ -276,7 +276,7 @@ impl Future for UserInput {
 
 type Ymd = (i32, u32, u32);
 
-pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
+pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
 
     use itertools::Itertools; // group_by
 
@@ -284,8 +284,8 @@ pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Op
 
     let groups = (0..)
         .flat_map(|d: i64| (0..4).map(move |h: i64| d*24 + h*6))
-        .map(|h| start00 + chrono::Duration::hours(h))
-        .skip_while(|t| start >= *t + chrono::Duration::hours(5))
+        .map(|h| start00.clone() + chrono::Duration::hours(h))
+        .skip_while(|t| start >= t.clone() + chrono::Duration::hours(5))
         .group_by(|t| (t.year(), t.month(), t.day()));
 
     groups
@@ -294,8 +294,8 @@ pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Op
         .map(|(ymd, ts)| {
             let hs = ts
                 .map(|t| (0..6)
-                     .map(move |h| t + chrono::Duration::hours(h))
-                     .map(|t| if t <= start && t < start + chrono::Duration::hours(120) { None } else { Some(t.hour()) })
+                     .map(|h| t.clone() + chrono::Duration::hours(h))
+                     .map(|t| if t <= start && t < start.clone() + chrono::Duration::hours(120) { None } else { Some(t.hour()) })
                      .collect()
                 )
                 .collect();
