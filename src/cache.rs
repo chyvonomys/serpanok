@@ -3,6 +3,7 @@ use crate::icon;
 use crate::grib;
 use std::sync::Arc;
 use lazy_static::*;
+use serde_derive::Serialize;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
 struct CacheEntry(String);
@@ -42,20 +43,26 @@ pub type MemCache<K, V> = Arc<std::sync::Mutex<std::collections::HashMap<
 
 pub fn purge_mem_cache() {
     let now = chrono::Utc::now();
-    MEM_CACHE.lock().unwrap()
-        .retain(move |key, (insert_time, _)| {
+    if let Ok(mut g) = MEM_CACHE.lock() {
+        let n0 = g.len();
+        g.retain(move |key, (insert_time, _)| {
             let keep = now - *insert_time < chrono::Duration::minutes(1);
             if !keep {
                 println!("remove cache future {:?}", key)
             }
             keep
-        })
+        });
+        println!("purge mem cache: {} -> {}", n0, g.len());
+    }
 }
 
 pub fn purge_disk_cache() {
     let deadline = chrono::Utc::now() - chrono::Duration::hours(1);
-    DISK_CACHE.lock().unwrap()
-        .retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(i64::from(k.timestep)) > deadline)
+    if let Ok(mut g) = DISK_CACHE.lock() {
+        let n0 = g.len();
+        g.retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(i64::from(k.timestep)) > deadline);
+        println!("purge disk cache: {} -> {}", n0, g.len());
+    }
 }
 
 type DiskCache<K> = Arc<std::sync::Mutex<std::collections::HashMap<
@@ -68,12 +75,17 @@ lazy_static! {
     static ref MEM_CACHE: MemCache<FileKey, grib::GribMessage> = Arc::new(std::sync::Mutex::new(std::collections::HashMap::default()));
 }
 
-pub fn disk_stats() -> Vec<FileKey> {
-    DISK_CACHE.lock().unwrap().keys().cloned().collect()
+#[derive(Serialize)]
+pub struct CacheStats {
+    disk_cache: Vec<FileKey>,
+    mem_cache: Vec<FileKey>,
 }
 
-pub fn mem_stats() -> Vec<FileKey> {
-    MEM_CACHE.lock().unwrap().keys().cloned().collect()
+pub fn stats() -> CacheStats {
+    return CacheStats {
+        disk_cache: DISK_CACHE.lock().unwrap().keys().cloned().collect(),
+        mem_cache: MEM_CACHE.lock().unwrap().keys().cloned().collect(),
+    }
 }
 
 pub fn fetch_grid(
@@ -111,7 +123,7 @@ fn simultaneous_fetch() {
 fn save_to_file(bytes: &[u8], path: &str) -> Result<(), String> {
     use std::io::Write;
 
-    std::fs::File::create("tempfile") // TODO:
+    std::fs::File::create(format!("{}.temp", path)) // TODO:
         .map_err(|e| format!("create tempfile failed: {}", e))
         .and_then(|f| {
             std::io::BufWriter::new(f)
@@ -195,10 +207,12 @@ fn make_fetch_grid_fut(
 ) -> Box<dyn Future<Output=Result<Arc<grib::GribMessage>, String>> + Send + Unpin> {
     use std::io::Read;
 
-    let icon_file = Arc::new(icon::IconFile::new(file_key));
+    let icon_file = Arc::new(icon::IconFile::new(file_key.clone()));
+    let path = icon_file.cache_filename().to_owned();
 
-    log.add_line(&format!("fetch grid: {}...", icon_file.cache_filename()));
-    let res = std::fs::File::open(icon_file.cache_filename())
+    log.add_line(&format!("fetch grid: {}...", &path));
+
+    let res = std::fs::File::open(&path)
         .map_err(|e| format!("file open failed: {}", e))
         .and_then(|f| {
             log.add_line("cache hit!");
@@ -215,7 +229,16 @@ fn make_fetch_grid_fut(
             log.add_line(&format!("cache miss: {}", &e));
             download_grid_fut(log.clone(), icon_file.clone())
                 .map_ok(move |v: Vec<u8>| {
-                    let res = save_to_file(&v, icon_file.cache_filename());
+                    let res = save_to_file(&v, &path)
+                        .and_then(|()| {
+                            DISK_CACHE.lock().map_err(|e| e.to_string()).and_then(|mut g| {
+                                if let Some(_) = g.insert(file_key, CacheEntry(path)) {
+                                    Err("DISK CACHE already had this item".to_owned())
+                                } else {
+                                    Ok( () )
+                                }
+                            })
+                        });
                     log.add_line(&format!("save to cache: {:?}", res));
                     v
                 })

@@ -159,9 +159,9 @@ fn stream_with_cancel() {
     tokio::spawn(t);
 }
 
-fn hresp<T>(code: u16, t: T) -> hyper::Response<hyper::Body>
+fn hresp<T>(code: u16, t: T, ct: &'static str) -> hyper::Response<hyper::Body>
 where T: Into<hyper::Body> {
-    hyper::Response::builder().status(code).body(t.into()).unwrap()
+    hyper::Response::builder().status(code).header("Content-Type", ct).body(t.into()).unwrap()
 }
 
 fn serpanok_api(
@@ -185,14 +185,14 @@ fn serpanok_api(
                     }
                     future::ok( () )
                 })
-                .then(|_| future::ok(hresp(200, "")));
+                .then(|_| future::ok(hresp(200, "", "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::GET, "/modeltimes") => {
             let body = icon::icon_modelrun_iter().map(|mr| {
                 format!("------- MODEL RUN {:02} ---------------------\n{:?}\n", mr, icon::icon_timestep_iter(mr).collect::<Vec<_>>())
             }).fold(String::new(), |mut acc, x| {acc.push_str(&x); acc});
-            Box::new(future::ok(hresp(200, body)))
+            Box::new(future::ok(hresp(200, body, "text/plain")))
         },
         (&hyper::Method::GET, "/dryrun") => {
             let start_time = chrono::Utc::now() - chrono::Duration::hours(6);
@@ -211,13 +211,13 @@ fn serpanok_api(
                                                            mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1
                 ))
                 .fold(res, |mut acc, x| {acc.push_str(&x); acc});
-            Box::new(future::ok(hresp(200, body)))
+            Box::new(future::ok(hresp(200, body, "text/plain")))
         },
         (&hyper::Method::GET, "/subs") => {
             let v: Vec<_> = ui::SUBS.lock().unwrap().values().cloned().collect();
             let f = future::ready(serde_json::to_string_pretty(&v))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::POST, "/subs") => {
@@ -246,16 +246,14 @@ fn serpanok_api(
                             (200, "registered".to_owned())
                         });
                     let p = r.unwrap_or_else(|e| (400, e.to_string()));
-                    future::ok(hresp(p.0, p.1))
+                    future::ok(hresp(p.0, p.1, "application/json"))
                 });
             Box::new(f)
         },
         (&hyper::Method::GET, "/cache") => {
-            let stats = (cache::disk_stats(), cache::mem_stats());
-
-            let f = future::ready(serde_json::to_string_pretty(&stats))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+            let f = future::ready(serde_json::to_string_pretty(&cache::stats()))
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::GET, "/picker") => {
@@ -281,17 +279,17 @@ fn serpanok_api(
                     result.push_str("\n");
                 }
             }
-            Box::new(future::ok(hresp(200, result)))
+            Box::new(future::ok(hresp(200, result, "text/plain")))
         },
         (&hyper::Method::GET, "/uis") => {
             let cs: Vec<(i64, i32)> = ui::USER_CLICKS.lock().unwrap().keys().cloned().collect();
             let is: Vec<i64> = ui::USER_INPUTS.lock().unwrap().keys().cloned().collect();
             let f = future::ready(serde_json::to_string_pretty(&(cs, is)))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
         },
-        _ => Box::new(future::ok(hresp(404, "[404]\n")))
+        _ => Box::new(future::ok(hresp(404, "[404]\n", "text/plain")))
     }
 }
 
