@@ -281,6 +281,22 @@ fn serpanok_api(
             }
             Box::new(future::ok(hresp(200, result, "text/plain")))
         },
+        (&hyper::Method::GET, "/query") => {
+            let target = params.get("target")
+                .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
+                .map(|f| f.into())
+                .unwrap_or_else(chrono::Utc::now);
+            let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
+            let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+            let log = std::sync::Arc::new(TaggedLog {tag: format!("=query=")});
+            let f = data::forecast_stream(log, lat, lon, target).into_future()
+                .map(|(h, _)| h)
+                .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
+                .map_ok(|f| format::format_forecast(None, &f))
+                .and_then(|format::ForecastText(upd)| future::ok(hresp(200, upd, "text/plain; charset=UTF-8")))
+                .or_else(|err| future::ok(hresp(500, err, "text/plain")));
+            Box::new(f)
+        },
         (&hyper::Method::GET, "/uis") => {
             let cs: Vec<(i64, i32)> = ui::USER_CLICKS.lock().unwrap().keys().cloned().collect();
             let is: Vec<i64> = ui::USER_INPUTS.lock().unwrap().keys().cloned().collect();
