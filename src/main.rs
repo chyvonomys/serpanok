@@ -263,9 +263,12 @@ fn serpanok_api(
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+            let tz = tz_search::lookup(f64::from(lat), f64::from(lon))
+                .and_then(|tag| tag.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC);
             let days_utc = ui::time_picker(start_utc);
-            let start_kyiv = chrono_tz::Europe::Kiev.from_utc_datetime(&start_utc.naive_utc());
-            let days_kyiv = ui::time_picker(start_kyiv);
+            let start_target = tz.from_utc_datetime(&start_utc.naive_utc());
+            let days_target = ui::time_picker(start_target);
 
             let mut left = String::new();
             for day in days_utc {
@@ -284,7 +287,7 @@ fn serpanok_api(
             }
 
             let mut right = String::new();
-            for day in days_kyiv {
+            for day in days_target {
                 let (y, m, d) = day.0;
                 right.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
                 for row in day.1 {
@@ -299,7 +302,10 @@ fn serpanok_api(
                 }
             }
 
-            let mut result = format!("startUtc={}, startKyiv={}, lon={}, lat={}\n", start_utc.to_rfc3339(), start_kyiv.to_rfc3339(), lon, lat);
+            let mut result = format!(
+                "start_utc:    {}\nstart_target: {}\nlon: {}, lat: {} tz: {}\n\n",
+                start_utc.to_rfc3339(), start_target.to_rfc3339(), lon, lat, start_target.timezone().name()
+            );
             let mut l = left.split('\n');
             let mut r = right.split('\n');
             loop {
