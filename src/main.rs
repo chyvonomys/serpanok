@@ -300,8 +300,8 @@ fn serpanok_api(
             }
 
             let mut result = format!("startUtc={}, startKyiv={}, lon={}, lat={}\n", start_utc.to_rfc3339(), start_kyiv.to_rfc3339(), lon, lat);
-            let mut l = left.split("\n");
-            let mut r = right.split("\n");
+            let mut l = left.split('\n');
+            let mut r = right.split('\n');
             loop {
                 match (l.next(), r.next()) {
                     (Some(a), Some(b)) => result.push_str(&format!("{:<25} {}\n", a,  b)),
@@ -319,7 +319,7 @@ fn serpanok_api(
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
-            let log = std::sync::Arc::new(TaggedLog {tag: format!("=query=")});
+            let log = std::sync::Arc::new(TaggedLog {tag: "=query=".to_owned()});
             let f = data::forecast_stream(log, lat, lon, target).into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))

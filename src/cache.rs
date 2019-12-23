@@ -82,7 +82,7 @@ pub struct CacheStats {
 }
 
 pub fn stats() -> CacheStats {
-    return CacheStats {
+    CacheStats {
         disk_cache: DISK_CACHE.lock().unwrap().keys().cloned().collect(),
         mem_cache: MEM_CACHE.lock().unwrap().keys().cloned().collect(),
     }
@@ -233,7 +233,7 @@ fn make_fetch_grid_fut(
                     let res = save_to_file(&v, &path)
                         .and_then(|()| {
                             DISK_CACHE.lock().map_err(|e| e.to_string()).and_then(|mut g| {
-                                if let Some(_) = g.insert(file_key, CacheEntry(path)) {
+                                if g.insert(file_key, CacheEntry(path)).is_some() {
                                     Err("DISK CACHE already had this item".to_owned())
                                 } else {
                                     Ok( () )

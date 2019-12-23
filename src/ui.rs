@@ -184,7 +184,7 @@ pub struct UiStats {
 }
 
 pub fn stats() -> UiStats {
-    return UiStats {
+    UiStats {
         buttons: USER_CLICKS.lock().unwrap().keys().cloned().collect(),
         inputs: USER_INPUTS.lock().unwrap().keys().cloned().collect(),
     }
@@ -275,10 +275,9 @@ impl Future for UserInput {
 }
 
 type Ymd = (i32, u32, u32);
+type PickerCell = Option<(u32, chrono::DateTime<chrono::Utc>)>;
 
-pub fn time_picker<TZ: chrono::TimeZone>(
-    start: chrono::DateTime<TZ>
-) -> Vec<(Ymd, Vec<Vec<Option<(u32, chrono::DateTime<chrono::Utc>)>>>)> {
+pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ymd, Vec<Vec<PickerCell>>)> {
 
     use itertools::Itertools; // group_by, merge_join_by
     
@@ -300,9 +299,9 @@ pub fn time_picker<TZ: chrono::TimeZone>(
                             itertools::EitherOrBoth::Right(j) => Some(j),
                             itertools::EitherOrBoth::Both(_, j) => Some(j),
                         }
-                    }).collect::<Vec<Option<(u32, _)>>>()
+                    }).collect::<Vec<PickerCell>>()
                 })
-                .collect::<Vec<Vec<Option<(u32, _)>>>>();
+                .collect::<Vec<Vec<PickerCell>>>();
              (ymd, hs)
         })
         .collect()

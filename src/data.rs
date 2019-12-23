@@ -273,7 +273,7 @@ where
                     future::ready(res)
                 })
         })
-        .filter_map(|item: Option<chrono::DateTime<chrono::Utc>>| future::ready(item))
+        .filter_map(future::ready)
         .into_future()
         .map(|(f, _)| f.ok_or_else(|| "tried all start times".to_string()))
 }
