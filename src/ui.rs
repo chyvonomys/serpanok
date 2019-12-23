@@ -5,7 +5,7 @@ use super::TaggedLog;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, Stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use chrono::{Datelike, Timelike, TimeZone};
+use chrono::{Datelike, Timelike};
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -276,29 +276,33 @@ impl Future for UserInput {
 
 type Ymd = (i32, u32, u32);
 
-pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
+pub fn time_picker<TZ: chrono::TimeZone>(
+    start: chrono::DateTime<TZ>
+) -> Vec<(Ymd, Vec<Vec<Option<(u32, chrono::DateTime<chrono::Utc>)>>>)> {
 
-    use itertools::Itertools; // group_by
+    use itertools::Itertools; // group_by, merge_join_by
+    
+    let start0 = start.date().and_hms(start.hour(), 0, 0);
 
-    let start00 = start.date().and_hms(0, 0, 0);
-
-    let groups = (0..)
-        .flat_map(|d: i64| (0..4).map(move |h: i64| d*24 + h*6))
-        .map(|h| start00.clone() + chrono::Duration::hours(h))
-        .skip_while(|t| start >= t.clone() + chrono::Duration::hours(5))
-        .group_by(|t| (t.year(), t.month(), t.day()));
-
-    groups
+    (1..120)
+        .map(|dh| start0.clone() + chrono::Duration::hours(dh))
+        .group_by(|t| (t.year(), t.month(), t.day()))
         .into_iter()
-        .take(6)
         .map(|(ymd, ts)| {
             let hs = ts
-                .map(|t| (0..6)
-                     .map(|h| t.clone() + chrono::Duration::hours(h))
-                     .map(|t| if t <= start && t < start.clone() + chrono::Duration::hours(120) { None } else { Some(t.hour()) })
-                     .collect()
-                )
-                .collect();
+                .map(|t| (t.hour(), chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc)))
+                .group_by(|p| p.0 / 6)
+                .into_iter()
+                .map(|(_row, xs)| {
+                    (0..6).merge_join_by(xs, |i, j| i.cmp(&(j.0 % 6))).map(|eith| {
+                        match eith {
+                            itertools::EitherOrBoth::Left(_) => None,
+                            itertools::EitherOrBoth::Right(j) => Some(j),
+                            itertools::EitherOrBoth::Both(_, j) => Some(j),
+                        }
+                    }).collect::<Vec<Option<(u32, _)>>>()
+                })
+                .collect::<Vec<Vec<Option<(u32, _)>>>>();
              (ymd, hs)
         })
         .collect()
@@ -310,7 +314,7 @@ fn process_widget(
 
     future::ok(format!("координати: *{}*", format::format_lat_lon(target_lat, target_lon)))
         .and_then(move |widget_text| {
-            type HourGrid = Vec<Vec<Option<u32>>>;
+            type HourGrid = Vec<Vec<Option<(u32, chrono::DateTime<chrono::Utc>)>>>;
             let mut days_map: HashMap<String, (Ymd, HourGrid)> = HashMap::new();
 
             let v = time_picker(chrono::Utc::now() - chrono::Duration::hours(1));
@@ -340,13 +344,13 @@ fn process_widget(
         })
         .and_then(move |(mut widget_text, msg_id, build)| {
             if let Some((ymd, tss)) = build {
-                let mut hours_map: HashMap<String, u32> = HashMap::new();
+                let mut hours_map: HashMap<String, (u32, _)> = HashMap::new();
 
                 let mut inline_keyboard: Vec<Vec<_>> = tss.iter().map(|r| {
                     let row: Vec<telegram::TgInlineKeyboardButtonCB> = r.iter().map(|c| {
                         match c {
                             Some(h) => {
-                                let t = format!("{:02}", h);
+                                let t = format!("{:02}", h.0);
                                 hours_map.insert(t.clone(), *h);
                                 telegram::TgInlineKeyboardButtonCB::new(t.clone(), t)
                             },
@@ -367,7 +371,7 @@ fn process_widget(
                     .and_then(move |()|
                         UserClick::new(chat_id, msg_id)
                             .map_ok(move |data| {
-                                let build = hours_map.remove(&data).map(|h| chrono::Utc.ymd(ymd.0, ymd.1, ymd.2).and_hms(h, 0, 0));
+                                let build = hours_map.remove(&data).map(|h| h.1);
                                 (widget_text, msg_id, build)
                             })
                     );

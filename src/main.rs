@@ -1,5 +1,5 @@
 use std::io::Read;
-use chrono::{Datelike, TimeZone};
+use chrono::{Datelike, Timelike, TimeZone};
 use serde_derive::Serialize;
 use lazy_static::*;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
@@ -274,7 +274,7 @@ fn serpanok_api(
                 for row in day.1 {
                     for col in row {
                         if let Some(h) = col {
-                            left.push_str(&format!(" {:02} ", h));
+                            left.push_str(&format!(" {:02} ", h.0));
                         } else {
                             left.push_str(" -- ");
                         }
@@ -289,10 +289,10 @@ fn serpanok_api(
                 right.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
                 for row in day.1 {
                     for col in row {
-                        if let Some(h) = col {
-                            right.push_str(&format!(" {:02} ", h));
+                        if let Some((h, t)) = col {
+                            right.push_str(&format!(" {:02}({:02}/{:02})", h, t.day(), t.hour()));
                         } else {
-                            right.push_str(" -- ");
+                            right.push_str(" -- -- -- ");
                         }
                     }
                     right.push_str("\n");
@@ -304,9 +304,9 @@ fn serpanok_api(
             let mut r = right.split("\n");
             loop {
                 match (l.next(), r.next()) {
-                    (Some(a), Some(b)) => result.push_str(&format!("{:<25} {}\n", a, b)),
-                    (Some(a), None) => result.push_str(&format!("{:<25}\n", a)),
-                    (None, Some(b)) => result.push_str(&format!("{:<25} {}\n", "", b)),
+                    (Some(a), Some(b)) => result.push_str(&format!("{:<25} {}\n", a,  b)),
+                    (Some(a), None,  ) => result.push_str(&format!("{:<25} {}\n", a, "")),
+                    (None,    Some(b)) => result.push_str(&format!("{:<25} {}\n", "", b)),
                     _ => break,
                 }
             }
