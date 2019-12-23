@@ -11,8 +11,8 @@ const MONTH_ABBREVS: [&str; 12] = [
     "Січ", "Лют", "Бер", "Кві", "Тра", "Чер", "Лип", "Сер", "Вер", "Жов", "Лис", "Гру"
 ];
 
-fn format_time(t: chrono::DateTime<chrono::Utc>) -> String {
-    format!("{} {} {:02}:{:02} (UTC)",
+fn format_time(t: chrono::DateTime<chrono_tz::Tz>) -> String {
+    format!("{} {} {:02}:{:02}",
             t.day(),
             MONTH_ABBREVS.get(t.month0() as usize).unwrap_or(&"?"),
             t.hour(), t.minute()
@@ -73,14 +73,14 @@ use crate::data;
 
 pub struct ForecastText(pub String);
 
-pub fn format_forecast(name: Option<&str>, f: &data::Forecast) -> ForecastText {
+pub fn format_forecast(name: Option<&str>, f: &data::Forecast, tz: chrono_tz::Tz) -> ForecastText {
     let interval = (f.time.1 - f.time.0).num_minutes() as f32;
     let mut result = String::new();
 
     if let Some(name) = name {
         result.push_str(&format!("\"{}\"\n", name));
     }
-    result.push_str(&format!("_{}_\n", format_time(f.time.0)));
+    result.push_str(&format!("_{}_\n", format_time(f.time.0.with_timezone(&tz))));
     result.push_str(&format!("t повітря: *{:.1}°C*\n", (10.0 * (f.temperature - 273.15)).round() / 10.0));
     if let Some(precip) = f.total_precip_accum {
         let precip_rate = ((precip.1 - precip.0) * 60.0 / interval).max(0.0);

@@ -159,6 +159,12 @@ fn stream_with_cancel() {
     tokio::spawn(t);
 }
 
+fn lookup_tz(lat: f32, lon: f32) -> chrono_tz::Tz {
+    tz_search::lookup(f64::from(lat), f64::from(lon))
+        .and_then(|tag| tag.parse::<chrono_tz::Tz>().ok())
+        .unwrap_or(chrono_tz::Tz::UTC)
+}
+
 fn hresp<T>(code: u16, t: T, ct: &'static str) -> hyper::Response<hyper::Body>
 where T: Into<hyper::Body> {
     hyper::Response::builder().status(code).header("Content-Type", ct).body(t.into()).unwrap()
@@ -237,7 +243,7 @@ fn serpanok_api(
                             );
                                  */
                                 exec.spawn(
-                                    ui::monitor_weather_wrap(s.clone())
+                                    ui::monitor_weather_wrap(s.clone(), lookup_tz(s.latitude, s.longitude))
                                         .map_ok(|_| ())
                                         .map_err(|err| println!("restored sub err: {}", err))
                                         .map(|_| ())
@@ -263,9 +269,7 @@ fn serpanok_api(
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
-            let tz = tz_search::lookup(f64::from(lat), f64::from(lon))
-                .and_then(|tag| tag.parse::<chrono_tz::Tz>().ok())
-                .unwrap_or(chrono_tz::Tz::UTC);
+            let tz = lookup_tz(lat, lon);
             let days_utc = ui::time_picker(start_utc);
             let start_target = tz.from_utc_datetime(&start_utc.naive_utc());
             let days_target = ui::time_picker(start_target);
@@ -325,11 +329,12 @@ fn serpanok_api(
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+            let tz = lookup_tz(lat, lon);
             let log = std::sync::Arc::new(TaggedLog {tag: "=query=".to_owned()});
             let f = data::forecast_stream(log, lat, lon, target).into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
-                .map_ok(|f| format::format_forecast(None, &f))
+                .map_ok(move |f| format::format_forecast(None, &f, tz))
                 .and_then(|format::ForecastText(upd)| future::ok(hresp(200, upd, "text/plain; charset=UTF-8")))
                 .or_else(|err| future::ok(hresp(500, err, "text/plain")));
             Box::new(f)
