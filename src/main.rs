@@ -1,5 +1,5 @@
 use std::io::Read;
-use chrono::{Datelike, TimeZone};
+use chrono::{Datelike, Timelike, TimeZone};
 use serde_derive::Serialize;
 use lazy_static::*;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
@@ -159,9 +159,15 @@ fn stream_with_cancel() {
     tokio::spawn(t);
 }
 
-fn hresp<T>(code: u16, t: T) -> hyper::Response<hyper::Body>
+fn lookup_tz(lat: f32, lon: f32) -> chrono_tz::Tz {
+    tz_search::lookup(f64::from(lat), f64::from(lon))
+        .and_then(|tag| tag.parse::<chrono_tz::Tz>().ok())
+        .unwrap_or(chrono_tz::Tz::UTC)
+}
+
+fn hresp<T>(code: u16, t: T, ct: &'static str) -> hyper::Response<hyper::Body>
 where T: Into<hyper::Body> {
-    hyper::Response::builder().status(code).body(t.into()).unwrap()
+    hyper::Response::builder().status(code).header("Content-Type", ct).body(t.into()).unwrap()
 }
 
 fn serpanok_api(
@@ -185,14 +191,14 @@ fn serpanok_api(
                     }
                     future::ok( () )
                 })
-                .then(|_| future::ok(hresp(200, "")));
+                .then(|_| future::ok(hresp(200, "", "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::GET, "/modeltimes") => {
             let body = icon::icon_modelrun_iter().map(|mr| {
                 format!("------- MODEL RUN {:02} ---------------------\n{:?}\n", mr, icon::icon_timestep_iter(mr).collect::<Vec<_>>())
             }).fold(String::new(), |mut acc, x| {acc.push_str(&x); acc});
-            Box::new(future::ok(hresp(200, body)))
+            Box::new(future::ok(hresp(200, body, "text/plain")))
         },
         (&hyper::Method::GET, "/dryrun") => {
             let start_time = chrono::Utc::now() - chrono::Duration::hours(6);
@@ -211,13 +217,13 @@ fn serpanok_api(
                                                            mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1
                 ))
                 .fold(res, |mut acc, x| {acc.push_str(&x); acc});
-            Box::new(future::ok(hresp(200, body)))
+            Box::new(future::ok(hresp(200, body, "text/plain")))
         },
         (&hyper::Method::GET, "/subs") => {
             let v: Vec<_> = ui::SUBS.lock().unwrap().values().cloned().collect();
             let f = future::ready(serde_json::to_string_pretty(&v))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::POST, "/subs") => {
@@ -237,7 +243,7 @@ fn serpanok_api(
                             );
                                  */
                                 exec.spawn(
-                                    ui::monitor_weather_wrap(s.clone())
+                                    ui::monitor_weather_wrap(s.clone(), lookup_tz(s.latitude, s.longitude))
                                         .map_ok(|_| ())
                                         .map_err(|err| println!("restored sub err: {}", err))
                                         .map(|_| ())
@@ -246,52 +252,100 @@ fn serpanok_api(
                             (200, "registered".to_owned())
                         });
                     let p = r.unwrap_or_else(|e| (400, e.to_string()));
-                    future::ok(hresp(p.0, p.1))
+                    future::ok(hresp(p.0, p.1, "application/json"))
                 });
             Box::new(f)
         },
         (&hyper::Method::GET, "/cache") => {
-            let stats = (cache::disk_stats(), cache::mem_stats());
-
-            let f = future::ready(serde_json::to_string_pretty(&stats))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+            let f = future::ready(serde_json::to_string_pretty(&cache::stats()))
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
             Box::new(f)
         },
         (&hyper::Method::GET, "/picker") => {
-            let start = params.get("start")
+            let start_utc = params.get("start")
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                 .map(|f| f.into())
                 .unwrap_or_else(chrono::Utc::now);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
-            let days = ui::time_picker(start);
-            let mut result = format!("start={}, lon={}, lat={}\n", start.to_rfc3339(), lon, lat);
-            for day in days {
+            let tz = lookup_tz(lat, lon);
+            let days_utc = ui::time_picker(start_utc);
+            let start_target = tz.from_utc_datetime(&start_utc.naive_utc());
+            let days_target = ui::time_picker(start_target);
+
+            let mut left = String::new();
+            for day in days_utc {
                 let (y, m, d) = day.0;
-                result.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
+                left.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
                 for row in day.1 {
                     for col in row {
                         if let Some(h) = col {
-                            result.push_str(&format!(" {:02} ", h));
+                            left.push_str(&format!(" {:02} ", h.0));
                         } else {
-                            result.push_str(" -- ");
+                            left.push_str(" -- ");
                         }
                     }
-                    result.push_str("\n");
+                    left.push_str("\n");
                 }
             }
-            Box::new(future::ok(hresp(200, result)))
+
+            let mut right = String::new();
+            for day in days_target {
+                let (y, m, d) = day.0;
+                right.push_str(&format!("{:04}-{:02}-{:02}:\n", y, m, d));
+                for row in day.1 {
+                    for col in row {
+                        if let Some((h, t)) = col {
+                            right.push_str(&format!(" {:02}({:02}/{:02})", h, t.day(), t.hour()));
+                        } else {
+                            right.push_str(" -- -- -- ");
+                        }
+                    }
+                    right.push_str("\n");
+                }
+            }
+
+            let mut result = format!(
+                "start_utc:    {}\nstart_target: {}\nlon: {}, lat: {} tz: {}\n\n",
+                start_utc.to_rfc3339(), start_target.to_rfc3339(), lon, lat, start_target.timezone().name()
+            );
+            let mut l = left.split('\n');
+            let mut r = right.split('\n');
+            loop {
+                match (l.next(), r.next()) {
+                    (Some(a), Some(b)) => result.push_str(&format!("{:<25} {}\n", a,  b)),
+                    (Some(a), None,  ) => result.push_str(&format!("{:<25} {}\n", a, "")),
+                    (None,    Some(b)) => result.push_str(&format!("{:<25} {}\n", "", b)),
+                    _ => break,
+                }
+            }
+            Box::new(future::ok(hresp(200, result, "text/plain")))
         },
-        (&hyper::Method::GET, "/uis") => {
-            let cs: Vec<(i64, i32)> = ui::USER_CLICKS.lock().unwrap().keys().cloned().collect();
-            let is: Vec<i64> = ui::USER_INPUTS.lock().unwrap().keys().cloned().collect();
-            let f = future::ready(serde_json::to_string_pretty(&(cs, is)))
-                .and_then(|json| future::ok(hresp(200, json)))
-                .or_else(|se_err| future::ok(hresp(500, se_err.to_string())));
+        (&hyper::Method::GET, "/query") => {
+            let target = params.get("target")
+                .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
+                .map(|f| f.into())
+                .unwrap_or_else(chrono::Utc::now);
+            let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
+            let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+            let tz = lookup_tz(lat, lon);
+            let log = std::sync::Arc::new(TaggedLog {tag: "=query=".to_owned()});
+            let f = data::forecast_stream(log, lat, lon, target).into_future()
+                .map(|(h, _)| h)
+                .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
+                .map_ok(move |f| format::format_forecast(None, &f, tz))
+                .and_then(|format::ForecastText(upd)| future::ok(hresp(200, upd, "text/plain; charset=UTF-8")))
+                .or_else(|err| future::ok(hresp(500, err, "text/plain")));
             Box::new(f)
         },
-        _ => Box::new(future::ok(hresp(404, "[404]\n")))
+        (&hyper::Method::GET, "/uis") => {
+            let f = future::ready(serde_json::to_string_pretty(&ui::stats()))
+                .and_then(|json| future::ok(hresp(200, json, "application/json")))
+                .or_else(|se_err| future::ok(hresp(500, se_err.to_string(), "text/plain")));
+            Box::new(f)
+        },
+        _ => Box::new(future::ok(hresp(404, "[404]\n", "text/plain")))
     }
 }
 

@@ -1,11 +1,11 @@
 use crate::telegram;
 use crate::format;
 use crate::data;
-use super::TaggedLog;
+use super::{TaggedLog, lookup_tz};
 use futures::{future, Future, FutureExt, TryFutureExt, stream, Stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use chrono::{Datelike, Timelike, TimeZone};
+use chrono::{Datelike, Timelike};
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -38,7 +38,7 @@ fn iter_cancel<S, I, SE, CE, CFn, CFt>(init: I, mut s: S, mut cf: CFn) -> impl S
     )
 }
 
-pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, String>> + Send + Unpin> {
+pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Output=Result<usize, String>> + Send + Unpin> {
     let key = (sub.chat_id, sub.widget_message_id);
     {
         let mut hm = SUBS.lock().unwrap();
@@ -53,7 +53,7 @@ pub fn monitor_weather_wrap(sub: Sub) -> Box<dyn Future<Output=Result<usize, Str
     let log = Arc::new(TaggedLog {tag: format!("{}:{}", chat_id, loc_msg_id)});
     let once = sub.name.is_none();
     let fts = data::forecast_stream(log.clone(), sub.latitude, sub.longitude, sub.target_time)
-        .map_ok(move |f| format::format_forecast(sub.name.as_ref().map(String::as_ref), &f))
+        .map_ok(move |f| format::format_forecast(sub.name.as_ref().map(String::as_ref), &f, tz))
         .inspect_ok({
             let log = log.clone();
             move |format::ForecastText(upd)| log.add_line(&format!("{}: {}", if once {"single update"} else {"update"}, upd))
@@ -117,8 +117,8 @@ pub struct Sub {
     chat_id: i64,
     location_message_id: i32,
     widget_message_id: i32,
-    latitude: f32,
-    longitude: f32,
+    pub latitude: f32,
+    pub longitude: f32,
     name: Option<String>, // name for repeated/none if once
     target_time: chrono::DateTime<chrono::Utc>,
 }
@@ -173,8 +173,21 @@ fn tg_answer_cbq(id: String, notification: Option<String>) -> impl Future<Output
 type MsgId = (i64, i32);
 
 lazy_static! {
-    pub static ref USER_CLICKS: Arc<Mutex<HashMap<MsgId, futures::channel::oneshot::Sender<String>>>> = Arc::default();
-    pub static ref USER_INPUTS: Arc<Mutex<HashMap<i64, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+    static ref USER_CLICKS: Arc<Mutex<HashMap<MsgId, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+    static ref USER_INPUTS: Arc<Mutex<HashMap<i64, futures::channel::oneshot::Sender<String>>>> = Arc::default();
+}
+
+#[derive(Serialize)]
+pub struct UiStats {
+    buttons: Vec<MsgId>,
+    inputs: Vec<i64>,
+}
+
+pub fn stats() -> UiStats {
+    UiStats {
+        buttons: USER_CLICKS.lock().unwrap().keys().cloned().collect(),
+        inputs: USER_INPUTS.lock().unwrap().keys().cloned().collect(),
+    }
 }
 
 const PADDING_DATA: &str = "na";
@@ -262,30 +275,33 @@ impl Future for UserInput {
 }
 
 type Ymd = (i32, u32, u32);
+type PickerCell = Option<(u32, chrono::DateTime<chrono::Utc>)>;
 
-pub fn time_picker(start: chrono::DateTime<chrono::Utc>) -> Vec<(Ymd, Vec<Vec<Option<u32>>>)> {
+pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ymd, Vec<Vec<PickerCell>>)> {
 
-    use itertools::Itertools; // group_by
+    use itertools::Itertools; // group_by, merge_join_by
+    
+    let start0 = start.date().and_hms(start.hour(), 0, 0);
 
-    let start00 = start.date().and_hms(0, 0, 0);
-
-    let groups = (0..)
-        .flat_map(|d: i64| (0..4).map(move |h: i64| d*24 + h*6))
-        .map(|h| start00 + chrono::Duration::hours(h))
-        .skip_while(|t| start >= *t + chrono::Duration::hours(5))
-        .group_by(|t| (t.year(), t.month(), t.day()));
-
-    groups
+    (1..120)
+        .map(|dh| start0.clone() + chrono::Duration::hours(dh))
+        .group_by(|t| (t.year(), t.month(), t.day()))
         .into_iter()
-        .take(6)
         .map(|(ymd, ts)| {
             let hs = ts
-                .map(|t| (0..6)
-                     .map(move |h| t + chrono::Duration::hours(h))
-                     .map(|t| if t <= start && t < start + chrono::Duration::hours(120) { None } else { Some(t.hour()) })
-                     .collect()
-                )
-                .collect();
+                .map(|t| (t.hour(), chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc)))
+                .group_by(|p| p.0 / 6)
+                .into_iter()
+                .map(|(_row, xs)| {
+                    (0..6).merge_join_by(xs, |i, j| i.cmp(&(j.0 % 6))).map(|eith| {
+                        match eith {
+                            itertools::EitherOrBoth::Left(_) => None,
+                            itertools::EitherOrBoth::Right(j) => Some(j),
+                            itertools::EitherOrBoth::Both(_, j) => Some(j),
+                        }
+                    }).collect::<Vec<PickerCell>>()
+                })
+                .collect::<Vec<Vec<PickerCell>>>();
              (ymd, hs)
         })
         .collect()
@@ -295,12 +311,20 @@ fn process_widget(
     chat_id: i64, loc_msg_id: i32, target_lat: f32, target_lon: f32
 ) -> impl Future<Output=Result<(), String>> {
 
-    future::ok(format!("координати: *{}*", format::format_lat_lon(target_lat, target_lon)))
+    let tz = lookup_tz(target_lat, target_lon);
+
+    let widget_text0 = format!(
+        "координати: *{}*\nчасовий пояс: _{}_",
+        format::format_lat_lon(target_lat, target_lon),
+        tz.name()
+    );
+
+    future::ok(widget_text0)
         .and_then(move |widget_text| {
-            type HourGrid = Vec<Vec<Option<u32>>>;
+            type HourGrid = Vec<Vec<Option<(u32, chrono::DateTime<chrono::Utc>)>>>;
             let mut days_map: HashMap<String, (Ymd, HourGrid)> = HashMap::new();
 
-            let v = time_picker(chrono::Utc::now() - chrono::Duration::hours(1));
+            let v = time_picker(chrono::Utc::now().with_timezone(&tz));
             let first = v.iter().take(3).map(|(ymd, ts)| {
                     let t = format!("{:02}.{:02}", ymd.2, ymd.1);
                     days_map.insert(t.clone(), (*ymd, ts.clone()));
@@ -319,7 +343,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nвибери дату (utc):", widget_text)), Some(loc_msg_id), Some(keyboard))
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nвибери дату:", widget_text)), Some(loc_msg_id), Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -327,13 +351,13 @@ fn process_widget(
         })
         .and_then(move |(mut widget_text, msg_id, build)| {
             if let Some((ymd, tss)) = build {
-                let mut hours_map: HashMap<String, u32> = HashMap::new();
+                let mut hours_map: HashMap<String, (u32, _)> = HashMap::new();
 
                 let mut inline_keyboard: Vec<Vec<_>> = tss.iter().map(|r| {
                     let row: Vec<telegram::TgInlineKeyboardButtonCB> = r.iter().map(|c| {
                         match c {
                             Some(h) => {
-                                let t = format!("{:02}", h);
+                                let t = format!("{:02}", h.0);
                                 hours_map.insert(t.clone(), *h);
                                 telegram::TgInlineKeyboardButtonCB::new(t.clone(), t)
                             },
@@ -350,11 +374,11 @@ fn process_widget(
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
                 widget_text.push_str(&format!("\nдата: *{}-{:02}-{:02}*", ymd.0, ymd.1, ymd.2));
 
-                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nвибери час (utc):", widget_text)), keyboard)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nвибери час:", widget_text)), keyboard)
                     .and_then(move |()|
                         UserClick::new(chat_id, msg_id)
                             .map_ok(move |data| {
-                                let build = hours_map.remove(&data).map(|h| chrono::Utc.ymd(ymd.0, ymd.1, ymd.2).and_hms(h, 0, 0));
+                                let build = hours_map.remove(&data).map(|h| h.1);
                                 (widget_text, msg_id, build)
                             })
                     );
@@ -372,7 +396,7 @@ fn process_widget(
                 ];
 
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
-                widget_text.push_str(&format!("\nчас: *{:02}:00 (utc)*", target_time.hour()));
+                widget_text.push_str(&format!("\nчас: *{:02}:00*", target_time.with_timezone(&tz).hour()));
                 let text = format!("{}\nякий прогноз цікавить:", widget_text);
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), keyboard).and_then(move |()| {
@@ -430,7 +454,7 @@ fn process_widget(
                             longitude: target_lon,
                             target_time,
                         };
-                        monitor_weather_wrap(sub).map_ok(move |status| (widget_text, msg_id, Some(status)) )
+                        monitor_weather_wrap(sub, tz).map_ok(move |status| (widget_text, msg_id, Some(status)) )
                     });
                 future::Either::Left(f)
             } else {
