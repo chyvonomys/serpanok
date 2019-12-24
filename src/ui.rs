@@ -71,7 +71,9 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
                 future::Either::Right(future::ok( () ))
             }
             .and_then(move |()| {
-                let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
+                let keyboard = telegram::TgInlineKeyboardMarkup {
+                    inline_keyboard: vec![make_custom_cancel_row("припинити")]
+                };
                 tg_edit_kb(chat_id, add_id, Some(keyboard))
                     .and_then(move |()| {
                         UserClick::new(chat_id, add_id)
@@ -84,7 +86,7 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
         .and_then(move |n| {
             tg_send_widget(
                 chat_id,
-                TgText::Plain(format!("вичерпано ({} оновлень)", n)),
+                TgText::Plain(format!("відстеження припинено\n({} оновлень)", n)),
                 Some(loc_msg_id),
                 None
             ).map_ok(move |_msg_id| n)
@@ -195,6 +197,10 @@ const CANCEL_DATA: &str = "xx";
 
 fn make_cancel_row() -> Vec<telegram::TgInlineKeyboardButtonCB>{
     vec![telegram::TgInlineKeyboardButtonCB::new("скасувати".to_owned(), CANCEL_DATA.to_owned())]
+}
+
+fn make_custom_cancel_row(text: &str) -> Vec<telegram::TgInlineKeyboardButtonCB>{
+    vec![telegram::TgInlineKeyboardButtonCB::new(text.to_owned(), CANCEL_DATA.to_owned())]
 }
 
 struct UserClick {
@@ -343,7 +349,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nвибери дату:", widget_text)), Some(loc_msg_id), Some(keyboard))
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), Some(loc_msg_id), Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -374,7 +380,7 @@ fn process_widget(
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
                 widget_text.push_str(&format!("\nдата: *{}-{:02}-{:02}*", ymd.0, ymd.1, ymd.2));
 
-                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nвибери час:", widget_text)), keyboard)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nоберіть час:", widget_text)), keyboard)
                     .and_then(move |()|
                         UserClick::new(chat_id, msg_id)
                             .map_ok(move |data| {
@@ -390,14 +396,14 @@ fn process_widget(
         .and_then(move |(mut widget_text, msg_id, build)| {
             if let Some(target_time) = build {
                 let inline_keyboard = vec![
-                    vec![telegram::TgInlineKeyboardButtonCB::new("надсилати оновлення".to_owned(), "live".to_owned())],
-                    vec![telegram::TgInlineKeyboardButtonCB::new("тільки поточний".to_owned(), "once".to_owned())],
+                    vec![telegram::TgInlineKeyboardButtonCB::new("так, надсилати оновлення".to_owned(), "live".to_owned())],
+                    vec![telegram::TgInlineKeyboardButtonCB::new("ні, тільки поточний".to_owned(), "once".to_owned())],
                     make_cancel_row(),
                 ];
 
                 let keyboard = Some(telegram::TgInlineKeyboardMarkup{ inline_keyboard });
                 widget_text.push_str(&format!("\nчас: *{:02}:00*", target_time.with_timezone(&tz).hour()));
-                let text = format!("{}\nякий прогноз цікавить:", widget_text);
+                let text = format!("{}\nбажаєте отримувати періодичні оновлення прогнозу?", widget_text);
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), keyboard).and_then(move |()| {
                     UserClick::new(chat_id, msg_id)
@@ -423,7 +429,7 @@ fn process_widget(
             },
             Some((false, target_time)) => {
                 let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
-                let text = format!("{}\nдай назву цьому спостереженню:", widget_text);
+                let text = format!("{}\nдайте назву цьому спостереженню:", widget_text);
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), Some(keyboard))
                     .and_then(move |()| {
@@ -444,7 +450,7 @@ fn process_widget(
                     widget_text.push_str(&format!("\nназва: *{}*", name));
                 }
 
-                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *відслідковується*", widget_text)), None)
+                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *у роботі*", widget_text)), None)
                     .and_then(move |()| {
                         let sub = Sub {
                             chat_id, name,
@@ -480,8 +486,8 @@ pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Output=Result<(
 
 static ANDRIY: i64 = 54_462_285;
 
-static SEND_LOCATION_MSG: &str = "покажи локацію для якої потрібно відслідковувати погоду";
-static WRONG_LOCATION_MSG: &str = "я можу відслідковувати тільки європейську погоду";
+static SEND_LOCATION_MSG: &str = "надішліть місце для якого хочете відстежувати погоду (з мобільного додатку)";
+static WRONG_LOCATION_MSG: &str = "я можу відстежувати тільки європейську погоду";
 static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
 static CBQ_ERROR_MSG: &str = "помилка";
 static PADDING_BTN_MSG: &str = "недоcтупна опція";
