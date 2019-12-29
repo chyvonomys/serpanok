@@ -66,8 +66,8 @@ pub struct TgUser {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug, PartialEq)]
-enum TgMessageEntityType {
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum TgMessageEntityType {
     Mention,
     Hashtag,
     Cashtag,
@@ -112,6 +112,7 @@ pub struct TgMessageEntity {
     #[serde(rename = "type")] type_: TgMessageEntityType,
     pub offset: usize,
     pub length: usize,
+    url: Option<String>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -133,21 +134,40 @@ pub struct TgMessage {
 }
 
 impl TgMessage {
+
+    // NOTE: entity offsets are in UTF-16 codepoints
+    pub fn extract_entity(&self, e: &TgMessageEntity) -> Option<String> {
+        self.text.as_ref().and_then(|t| {
+            let v: Vec<u16> = t.encode_utf16().skip(e.offset).take(e.length).collect();
+            String::from_utf16(&v).ok()
+        })
+    }
+/*
     pub fn first_bot_command(&self) -> Option<String> {
-        self.entities.as_ref()
-            .and_then(|es| es
-                      .iter()
-                      .find(|e| e.type_ == TgMessageEntityType::BotCommand)
-                      .and_then(|e| self.text
-                                .as_ref()
-                                .map(|t| t
-                                     .chars()
-                                     .skip(e.offset)
-                                     .take(e.length)
-                                     .collect()
-                                )
-                      )
-            )
+        self.entities.as_ref().and_then(|es| {
+            es
+                .iter()
+                .find(|e| e.type_ == TgMessageEntityType::BotCommand)
+                .and_then(|e| self.extract_entity(e))
+        })
+    }
+*/
+    pub fn get_text_links<'m>(&'m self) -> impl Iterator<Item=(String, &'m str)> + 'm {
+        self.entities.iter().map(move |es| 
+            es.iter().filter_map(move |x| {
+                /*x.type_ == TgMessageEntityType::TextLink*/
+                x.url.as_ref().map(|s| s.as_str()).and_then(|url| self.extract_entity(x).map(|t| (t, url)))
+            })
+        ).flatten()
+    }
+
+    pub fn get_entities_of_type<'m>(&'m self, typ: TgMessageEntityType) -> impl Iterator<Item=String> + 'm {
+        self.entities.iter().map(move |es| 
+            es.iter().filter_map(move |x| {
+                (if x.type_ == typ { Some(x) } else { None })
+                    .and_then(|x| self.extract_entity(x))
+            })
+        ).flatten()
     }
 }
 
@@ -183,6 +203,7 @@ pub struct TgSendMsg {
     #[serde(skip_serializing_if = "Option::is_none")] pub reply_to_message_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub reply_markup: Option<TgInlineKeyboardMarkup>,
+    pub disable_web_page_preview: bool,
 }
 
 #[derive(Serialize)]
@@ -192,6 +213,7 @@ pub struct TgEditMsg {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")] pub parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub reply_markup: Option<TgInlineKeyboardMarkup>,
+    pub disable_web_page_preview: bool,
 }
 
 #[derive(Serialize)]

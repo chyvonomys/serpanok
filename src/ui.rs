@@ -62,7 +62,7 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let f = iter_cancel(
         widget_msg_id,
         fts.take(if once {1} else {1000}).and_then(
-            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), Some(loc_msg_id), None)
+            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None/*Some(loc_msg_id)*/, None)
         ),
         move |remove_id, add_id| {
             if let Some(msg_id) = remove_id {
@@ -148,7 +148,7 @@ fn tg_update_widget(
 
     let (parse_mode, text) = text.into_pair();
     telegram::tg_call("editMessageText", telegram::TgEditMsg {
-        chat_id, text, message_id, reply_markup, parse_mode
+        chat_id, text, message_id, reply_markup, parse_mode, disable_web_page_preview: true
     }).map_ok(|telegram::TgMessageUltraLite {..}| ())
 }
 
@@ -158,7 +158,7 @@ fn tg_send_widget(
 
     let (parse_mode, text) = text.into_pair();
     telegram::tg_call("sendMessage", telegram::TgSendMsg {
-        chat_id, text, reply_to_message_id, reply_markup, parse_mode
+        chat_id, text, reply_to_message_id, reply_markup, parse_mode, disable_web_page_preview: true
     }).map_ok(|m: telegram::TgMessageUltraLite| m.message_id)
 }
 
@@ -314,14 +314,15 @@ pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ym
 }
 
 fn process_widget(
-    chat_id: i64, loc_msg_id: i32, target_lat: f32, target_lon: f32
+    chat_id: i64, loc_msg_id: i32, target_lat: f32, target_lon: f32, name: Option<String>
 ) -> impl Future<Output=Result<(), String>> {
 
     let tz = lookup_tz(target_lat, target_lon);
 
     let widget_text0 = format!(
-        "координати: *{}*\nчасовий пояс: _{}_",
-        format::format_lat_lon(target_lat, target_lon),
+        "місце: [{}]({})\nчасовий пояс: _{}_",
+        name.unwrap_or(format::format_lat_lon(target_lat, target_lon)),
+        format!("http://www.openstreetmap.org/?mlat={}&mlon={}", target_lat, target_lon),
         tz.name()
     );
 
@@ -349,7 +350,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), Some(loc_msg_id), Some(keyboard))
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), None/*Some(loc_msg_id)*/, Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -486,12 +487,16 @@ pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Output=Result<(
 
 static ANDRIY: i64 = 54_462_285;
 
-static SEND_LOCATION_MSG: &str = "надішліть місце для якого хочете відстежувати погоду (з мобільного додатку)";
+static USAGE_MSG: &str = "\u{1F4A1} щоб почати нове відстеження потрібно вказати місце\n\n\
+надати місце можна різними способами:\n\
+\u{1F4CD} *точне розташування*\n\
+`     `(меню \u{1F4CE} в мобільному додатку)\n\
+\u{1F5FA} *по назві місця*\n\
+`     `(ввести `@osmbot <назва>` і вибрати з списку)";
 static WRONG_LOCATION_MSG: &str = "я можу відстежувати тільки європейську погоду";
 static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
 static CBQ_ERROR_MSG: &str = "помилка";
 static PADDING_BTN_MSG: &str = "недоcтупна опція";
-static TEXT_ERROR_MSG: &str = "я не розумію";
 
 // TODO: what if user deletes chat or deletes widget message??
 // ANSWER: in private chats user can only delete message for himself
@@ -505,12 +510,18 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
-                    "/start" => Box::new(tg_send_widget(chat_id, TgText::Plain(SEND_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ())),
+                    "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
                     _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
                 },
             SeUpdateVariant::Location {location, msg_id} =>
                 if location.latitude > 29.5 && location.latitude < 70.5 && location.longitude > -23.5 && location.longitude < 45.0 {
-                    Box::new(process_widget(chat_id, msg_id, location.latitude, location.longitude))
+                    Box::new(process_widget(chat_id, msg_id, location.latitude, location.longitude, None))
+                } else {
+                    Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
+                }
+            SeUpdateVariant::OSMPlace {latitude, longitude, name, msg_id} =>
+                if latitude > 29.5 && latitude < 70.5 && longitude > -23.5 && longitude < 45.0 {
+                    Box::new(process_widget(chat_id, msg_id, latitude, longitude, Some(name)))
                 } else {
                     Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
                 }
@@ -535,7 +546,7 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                 if ok {
                     Box::new(future::ok( () ))
                 } else {
-                    Box::new(tg_send_widget(chat_id, TgText::Plain(TEXT_ERROR_MSG.to_owned()), None, None).map_ok(|_m| () ))
+                    Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_m| () ))
                 }
             },
         },            
@@ -567,15 +578,64 @@ enum SeUpdateVariant {
         location: telegram::TgLocation,
         msg_id: i32,
     },
+    OSMPlace {
+        latitude: f32,
+        longitude: f32,
+        name: String,
+        msg_id: i32,
+    },
     Command(String),
     Text(String),
 }
 
+fn parse_osm_url(url: &str) -> Option<(f32, f32)> {
+    lazy_static! {
+        static ref LAT_RE: regex::Regex = regex::Regex::new(r"www\.openstreetmap\.org/.*[?&]mlat=(-?\d+.\d+)").unwrap();
+        static ref LON_RE: regex::Regex = regex::Regex::new(r"www\.openstreetmap\.org/.*[?&]mlon=(-?\d+.\d+)").unwrap();
+    }
+    Some(())
+        .and_then(| _ | LAT_RE.captures(url).and_then(|cs| cs.get(1).and_then(|m| m.as_str().parse::<f32>().ok())))
+        .and_then(|lat| LON_RE.captures(url).and_then(|cs| cs.get(1).and_then(|m| m.as_str().parse::<f32>().ok())).map(|lon| (lat, lon)))
+}
+
+fn parse_osm_title(h: &str) -> Option<&str> {
+    lazy_static! {
+        static ref NAME_RE: regex::Regex = regex::Regex::new(r"^Tags for (.+) $").unwrap();
+    }
+    NAME_RE.captures(h).and_then(|cs| cs.get(1).map(|m| m.as_str()))
+}
+
+#[test]
+fn test_osm_url() {
+    let url = "http://www.openstreetmap.org/?minlat=50.4718774&maxlat=50.5518774&minlon=25.6526259&maxlon=25.6526259&mlat=50.5118774&mlon=25.6126259";
+    assert_eq!(parse_osm_url(url), Some((50.5118774f32, 25.6126259f32)));
+}
+
 impl From<telegram::TgUpdate> for SeUpdate {
     fn from(upd: telegram::TgUpdate) -> Self {
+        if let Some(ref m) = upd.message {
+            if let Some(ref es) = m.entities {
+                for e in es {
+                    println!("entitity: {:?} -> `{:?}`", e, m.extract_entity(&e));
+                }
+            }
+        }
+
+        use telegram::TgMessageEntityType;
+
+        let osm_coords = upd.message.as_ref()
+            .and_then(|m| m.get_text_links().find_map(|(label, url)| if label == "Map" { Some(url) } else { None }))
+            .and_then(|url| parse_osm_url(url));
         
-        match (upd.message.as_ref().and_then(|m| m.first_bot_command()), upd) {
-            (None, telegram::TgUpdate {
+        let osm_name = upd.message.as_ref()
+            .and_then(|m| m.get_entities_of_type(TgMessageEntityType::Bold).next())
+            .and_then(|h| parse_osm_title(h.as_str()).map(|x| x.to_owned()));
+
+        let osm_info = osm_coords.and_then(|coords| osm_name.map(|name| (name, coords)));
+
+        let first_command = upd.message.as_ref().and_then(|m| m.get_entities_of_type(TgMessageEntityType::BotCommand).next().map(|s| s.to_owned()));
+        match (first_command, osm_info, upd) {
+            (None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -587,7 +647,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Location {location, msg_id} },
 
-            (None, telegram::TgUpdate {
+            (None, None, telegram::TgUpdate {
                 message: None,
                 callback_query: Some(telegram::TgCallbackQuery {
                     id,
@@ -600,7 +660,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::CBQ {id, msg_id, data} },
 
-            (None, telegram::TgUpdate {
+            (None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -612,7 +672,20 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Text(text) },
 
-            (Some(cmd), telegram::TgUpdate {
+            (None, Some((name, (latitude, longitude))), telegram::TgUpdate {
+                message: Some(telegram::TgMessage {
+                    from: Some(user),
+                    message_id: msg_id,
+                    chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
+                    location: None,
+                    ..
+                }),
+                callback_query: None,
+            }) => SeUpdate::PrivateChat {
+                chat_id, user, update: SeUpdateVariant::OSMPlace{latitude, longitude, name, msg_id}
+            },
+
+            (Some(cmd), None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -623,7 +696,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
 
-            (_, u) => SeUpdate::Other(u),
+            (_, _, u) => SeUpdate::Other(u),
         }
     }
 }
