@@ -51,9 +51,9 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let loc_msg_id = sub.location_message_id;
     let widget_msg_id = sub.widget_message_id;
     let log = Arc::new(TaggedLog {tag: format!("{}:{}", chat_id, loc_msg_id)});
-    let once = sub.name.is_none();
+    let once = if let Mode::Once = sub.mode { true } else { false };
     let fts = data::forecast_stream(log.clone(), sub.latitude, sub.longitude, sub.target_time)
-        .map_ok(move |f| format::format_forecast(sub.name.as_ref().map(String::as_ref), &f, tz))
+        .map_ok(move |f| format::format_forecast(&sub.name, sub.latitude, sub.longitude, &f, tz))
         .inspect_ok({
             let log = log.clone();
             move |format::ForecastText(upd)| log.add_line(&format!("{}: {}", if once {"single update"} else {"update"}, upd))
@@ -83,14 +83,6 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
         },
     )
         .try_fold(0, |n, _| future::ok::<_, String>(n+1))
-        .and_then(move |n| {
-            tg_send_widget(
-                chat_id,
-                TgText::Plain(format!("відстеження припинено\n({} оновлень)", n)),
-                Some(loc_msg_id),
-                None
-            ).map_ok(move |_msg_id| n)
-        })
         .inspect_ok(move |n| log.add_line(&format!("done: {} updates", n)))
         .map_err(|e| format!("subscription future error: {}", e))
         .then(move |x| {SUBS.lock().unwrap().remove(&key); future::ready(x)});
@@ -115,14 +107,21 @@ QUESTION: will those requests ever finish?
 use serde_derive::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone)]
+enum Mode {
+    Once,
+    Live,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Sub {
     chat_id: i64,
     location_message_id: i32,
     widget_message_id: i32,
     pub latitude: f32,
     pub longitude: f32,
-    name: Option<String>, // name for repeated/none if once
+    name: Option<String>, // name for place/none if coords
     target_time: chrono::DateTime<chrono::Utc>,
+    mode: Mode,
 }
 
 #[allow(dead_code)]
@@ -241,7 +240,7 @@ impl Future for UserClick {
         self.rx.poll_unpin(cx)
     }
 }
-
+/*
 struct UserInput {
     chat_id: i64,
     rx: Box<dyn Future<Output=Result<String, String>> + Send + Unpin>,
@@ -279,7 +278,7 @@ impl Future for UserInput {
         self.rx.poll_unpin(cx)
     }
 }
-
+*/
 type Ymd = (i32, u32, u32);
 type PickerCell = Option<(u32, chrono::DateTime<chrono::Utc>)>;
 
@@ -320,9 +319,8 @@ fn process_widget(
     let tz = lookup_tz(target_lat, target_lon);
 
     let widget_text0 = format!(
-        "місце: [{}]({})\nчасовий пояс: _{}_",
-        name.unwrap_or(format::format_lat_lon(target_lat, target_lon)),
-        format!("http://www.openstreetmap.org/?mlat={}&mlon={}", target_lat, target_lon),
+        "місце: {}\nчасовий пояс: _{}_",
+        format::format_place_link(&name, target_lat, target_lon),
         tz.name()
     );
 
@@ -410,8 +408,8 @@ fn process_widget(
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data: String| {
                             match data.as_str() {
-                                "live" => Some(false),
-                                "once" => Some(true),
+                                "live" => Some(Mode::Live),
+                                "once" => Some(Mode::Once),
                                 _ => None,
                             }
                             .map(|once| (once, target_time))
@@ -423,6 +421,7 @@ fn process_widget(
                 future::Either::Right(future::ok((widget_text, msg_id, None)))
             }
         })
+        /*
         .and_then(move |(widget_text, msg_id, build)| match build {
             Some((true, target_time)) => {
                 let t = (widget_text, msg_id, Some((target_time, None)));
@@ -445,11 +444,12 @@ fn process_widget(
             },
             None => future::Either::Right(future::ok((widget_text, msg_id, None))),
         })
-        .and_then(move |(mut widget_text, msg_id, build)| {
-            if let Some((target_time, name)) = build {
-                if let Some(ref name) = name {
-                    widget_text.push_str(&format!("\nназва: *{}*", name));
-                }
+        */
+        .map_ok(move |(widget_text, msg_id, build)| {
+            (widget_text, msg_id, build.map(|(mode, target_time)| (target_time, name, mode)))
+        })
+        .and_then(move |(widget_text, msg_id, build)| {
+            if let Some((target_time, name, mode)) = build {
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *у роботі*", widget_text)), None)
                     .and_then(move |()| {
@@ -459,7 +459,7 @@ fn process_widget(
                             widget_message_id: msg_id,
                             latitude: target_lat,
                             longitude: target_lon,
-                            target_time,
+                            target_time, mode,
                         };
                         monitor_weather_wrap(sub, tz).map_ok(move |status| (widget_text, msg_id, Some(status)) )
                     });
@@ -476,8 +476,10 @@ fn process_widget(
             tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *{}*", widget_text, status)), None)
         })
         .or_else(move |e| {
-            tg_send_widget(chat_id, TgText::Markdown(format!("сталась помилка: `{}`", e)), Some(loc_msg_id), None)
+            tg_send_widget(chat_id, TgText::Markdown("сталась помилка".to_owned()), None, None).then(move |_| {
+            tg_send_widget(ANDRIY, TgText::Markdown(format!("error in {}:{}: `{}`", chat_id, loc_msg_id, e)), None, None)
                 .map_ok(|_msg| ())
+            })
         })
 }
 
@@ -487,8 +489,9 @@ pub fn process_update(tgu: telegram::TgUpdate) -> Box<dyn Future<Output=Result<(
 
 static ANDRIY: i64 = 54_462_285;
 
-static USAGE_MSG: &str = "\u{1F4A1} щоб почати нове відстеження потрібно вказати місце\n\n\
-надати місце можна різними способами:\n\
+static USAGE_MSG: &str = "\u{1F4A1} цей бот вміє відстежувати і періодично надсилати\n\
+оновлення прогнозу погоди для заданого місця та часу\n\n\
+щоб почати, вкажіть місце одним із способів:\n\
 \u{1F4CD} *точне розташування*\n\
 `     `(меню \u{1F4CE} в мобільному додатку)\n\
 \u{1F5FA} *по назві місця*\n\
@@ -538,10 +541,13 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                     Box::new(tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
                              .map_err(|e| format!("answer cbq error: {}", e.to_string())))
                 },
-            SeUpdateVariant::Text(text) => {
+            SeUpdateVariant::Text(_) => {
+                /*
                 let ok = UserInput::input(chat_id, text)
                     .map_err(|e| println!("text {} error: {}", chat_id, e))
                     .is_ok();
+                */
+                let ok = false;
 
                 if ok {
                     Box::new(future::ok( () ))
@@ -613,13 +619,6 @@ fn test_osm_url() {
 
 impl From<telegram::TgUpdate> for SeUpdate {
     fn from(upd: telegram::TgUpdate) -> Self {
-        if let Some(ref m) = upd.message {
-            if let Some(ref es) = m.entities {
-                for e in es {
-                    println!("entitity: {:?} -> `{:?}`", e, m.extract_entity(&e));
-                }
-            }
-        }
 
         use telegram::TgMessageEntityType;
 

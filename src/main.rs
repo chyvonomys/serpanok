@@ -334,7 +334,7 @@ fn serpanok_api(
             let f = data::forecast_stream(log, lat, lon, target).into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
-                .map_ok(move |f| format::format_forecast(None, &f, tz))
+                .map_ok(move |f| format::format_forecast(&None, lat, lon, &f, tz))
                 .and_then(|format::ForecastText(upd)| future::ok(hresp(200, upd, "text/plain; charset=UTF-8")))
                 .or_else(|err| future::ok(hresp(500, err, "text/plain")));
             Box::new(f)

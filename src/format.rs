@@ -73,13 +73,17 @@ use crate::data;
 
 pub struct ForecastText(pub String);
 
-pub fn format_forecast(name: Option<&str>, f: &data::Forecast, tz: chrono_tz::Tz) -> ForecastText {
+pub fn format_place_link(name: &Option<String>, lat: f32, lon: f32) -> String {
+    let text = name.clone().unwrap_or(format_lat_lon(lat, lon));
+    format!("[{}](http://www.openstreetmap.org/?mlat={}&mlon={})", text, lat, lon)
+}
+
+pub fn format_forecast(name: &Option<String>, lat: f32, lon: f32, f: &data::Forecast, tz: chrono_tz::Tz) -> ForecastText {
     let interval = (f.time.1 - f.time.0).num_minutes() as f32;
     let mut result = String::new();
 
-    if let Some(name) = name {
-        result.push_str(&format!("\"{}\"\n", name));
-    }
+    result.push_str(&format_place_link(name, lat, lon));
+    result.push('\n');
     result.push_str(&format!("_{}_\n", format_time(f.time.0.with_timezone(&tz))));
     result.push_str(&format!("t повітря: *{:.1}°C*\n", (10.0 * (f.temperature - 273.15)).round() / 10.0));
     if let Some(precip) = f.total_precip_accum {

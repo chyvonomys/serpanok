@@ -44,7 +44,6 @@ pub type MemCache<K, V> = Arc<std::sync::Mutex<std::collections::HashMap<
 pub fn purge_mem_cache() {
     let now = chrono::Utc::now();
     if let Ok(mut g) = MEM_CACHE.lock() {
-        let n0 = g.len();
         g.retain(move |key, (insert_time, _)| {
             let keep = now - *insert_time < chrono::Duration::minutes(1);
             if !keep {
@@ -52,16 +51,13 @@ pub fn purge_mem_cache() {
             }
             keep
         });
-        println!("purge mem cache: {} -> {}", n0, g.len());
     }
 }
 
 pub fn purge_disk_cache() {
     let deadline = chrono::Utc::now() - chrono::Duration::hours(1);
     if let Ok(mut g) = DISK_CACHE.lock() {
-        let n0 = g.len();
         g.retain(|k, _| k.get_modelrun_tm() + chrono::Duration::hours(i64::from(k.timestep)) > deadline);
-        println!("purge disk cache: {} -> {}", n0, g.len());
     }
 }
 
