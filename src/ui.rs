@@ -62,7 +62,7 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let f = iter_cancel(
         widget_msg_id,
         fts.take(if once {1} else {1000}).and_then(
-            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None/*Some(loc_msg_id)*/, None)
+            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None, None)
         ),
         move |remove_id, add_id| {
             if let Some(msg_id) = remove_id {
@@ -348,7 +348,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), None/*Some(loc_msg_id)*/, Some(keyboard))
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), None, Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -516,15 +516,9 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                     "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
                     _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
                 },
-            SeUpdateVariant::Location {location, msg_id} =>
-                if location.latitude > 29.5 && location.latitude < 70.5 && location.longitude > -23.5 && location.longitude < 45.0 {
-                    Box::new(process_widget(chat_id, msg_id, location.latitude, location.longitude, None))
-                } else {
-                    Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
-                }
-            SeUpdateVariant::OSMPlace {latitude, longitude, name, msg_id} =>
+            SeUpdateVariant::Place {latitude, longitude, name, msg_id} =>
                 if latitude > 29.5 && latitude < 70.5 && longitude > -23.5 && longitude < 45.0 {
-                    Box::new(process_widget(chat_id, msg_id, latitude, longitude, Some(name)))
+                    Box::new(process_widget(chat_id, msg_id, latitude, longitude, name))
                 } else {
                     Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
                 }
@@ -580,14 +574,10 @@ enum SeUpdateVariant {
         msg_id: i32,
         data: String,
     },
-    Location {
-        location: telegram::TgLocation,
-        msg_id: i32,
-    },
-    OSMPlace {
+    Place {
         latitude: f32,
         longitude: f32,
-        name: String,
+        name: Option<String>,
         msg_id: i32,
     },
     Command(String),
@@ -642,9 +632,15 @@ impl From<telegram::TgUpdate> for SeUpdate {
                     text: None,
                     entities: None,
                     location: Some(location),
+                    venue,
                 }),
                 callback_query: None,
-            }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Location {location, msg_id} },
+            }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Place {
+                latitude: location.latitude,
+                longitude: location.longitude,
+                name: venue.map(|v| v.title),
+                msg_id,
+            } },
 
             (None, None, telegram::TgUpdate {
                 message: None,
@@ -681,7 +677,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat {
-                chat_id, user, update: SeUpdateVariant::OSMPlace{latitude, longitude, name, msg_id}
+                chat_id, user, update: SeUpdateVariant::Place{latitude, longitude, name: Some(name), msg_id}
             },
 
             (Some(cmd), None, telegram::TgUpdate {
@@ -697,165 +693,5 @@ impl From<telegram::TgUpdate> for SeUpdate {
 
             (_, _, u) => SeUpdate::Other(u),
         }
-    }
-}
-
-#[test]
-fn tg_location() {
-    let t = r#"
-    {
-      "update_id": 14180656,
-      "message": {
-        "message_id": 2,
-        "from": {
-          "id": 54462285,
-          "is_bot": false,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "language_code": "en-UA"
-        },
-        "chat": {
-          "id": 54462285,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "type": "private"
-        },
-        "date": 1541198764,
-        "location": {
-          "latitude": 50.425195,
-          "longitude": 25.703556
-        }
-      }
-    }
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::Location {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::Location", u);
-    }
-}
-
-#[test]
-fn tg_start() {
-    let t = r#"
-    {
-      "update_id": 14180655,
-      "message": {
-        "message_id": 1,
-        "from": {
-          "id": 54462285,
-          "is_bot": false,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "chat": {
-          "id": 54462285,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "type": "private"
-        },
-        "date": 1541198334,
-        "text": "/start",
-        "entities": [
-          {
-            "offset": 0,
-            "length": 6,
-            "type": "bot_command"
-          }
-        ]
-      }
-    }
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::Command {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::Command", u);
-    }
-}
-
-#[test]
-fn tg_cbq() {
-    let t = r#"
-{
-  "callback_query": {
-    "chat_instance": "8882132206646987846",
-    "data": "11.11",
-    "from": {
-      "first_name": "Andriy",
-      "id": 54462285,
-      "is_bot": false,
-      "language_code": "en-UA",
-      "last_name": "Chyvonomys",
-      "username": "chyvonomys"
-    },
-    "id": "233913736986880302",
-    "message": {
-      "chat": {
-        "first_name": "Andriy",
-        "id": 54462285,
-        "last_name": "Chyvonomys",
-        "type": "private",
-        "username": "chyvonomys"
-      },
-      "date": 1541890580,
-      "from": {
-        "first_name": "серпанок",
-        "id": 701332998,
-        "is_bot": true,
-        "username": "serpanok_bot"
-      },
-      "message_id": 115,
-      "reply_to_message": {
-        "chat": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "last_name": "Chyvonomys",
-          "type": "private",
-          "username": "chyvonomys"
-        },
-        "date": 1541890579,
-        "forward_date": 1541795230,
-        "forward_from": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "is_bot": false,
-          "language_code": "en-UA",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "from": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "is_bot": false,
-          "language_code": "en-UA",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "location": {
-          "latitude": 50.610482,
-          "longitude": 26.341016
-        },
-        "message_id": 113
-      },
-      "text": "location: 50.610°N 26.341°E, pick a date (utc):"
-    }
-  },
-  "update_id": 14180731
-}
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::CBQ {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::CBQ", u);
     }
 }
