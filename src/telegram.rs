@@ -124,6 +124,11 @@ pub struct TgLocation {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct TgVenue {
+    pub title: String,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct TgMessage {
     pub from: Option<TgUser>,
     pub chat: TgChat,
@@ -131,6 +136,7 @@ pub struct TgMessage {
     pub text: Option<String>,
     pub entities: Option<Vec<TgMessageEntity>>,
     pub location: Option<TgLocation>,
+    pub venue: Option<TgVenue>,
 }
 
 impl TgMessage {

@@ -51,19 +51,22 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let loc_msg_id = sub.location_message_id;
     let widget_msg_id = sub.widget_message_id;
     let log = Arc::new(TaggedLog {tag: format!("{}:{}", chat_id, loc_msg_id)});
-    let once = if let Mode::Once = sub.mode { true } else { false };
-    let fts = data::forecast_stream(log.clone(), sub.latitude, sub.longitude, sub.target_time)
-        .map_ok(move |f| format::format_forecast(&sub.name, sub.latitude, sub.longitude, &f, tz))
-        .inspect_ok({
-            let log = log.clone();
-            move |format::ForecastText(upd)| log.add_line(&format!("{}: {}", if once {"single update"} else {"update"}, upd))
-        });
+
+    let fts = match sub.mode {
+        Mode::Daily(_sendh, _targeth) => future::Either::Left(stream::empty()),
+        Mode::Once(target_time) => future::Either::Right(
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time).take(1)
+        ),
+        Mode::Live(target_time) => future::Either::Right(
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time).take(1000)
+        ),
+    };
 
     let f = iter_cancel(
         widget_msg_id,
-        fts.take(if once {1} else {1000}).and_then(
-            move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None/*Some(loc_msg_id)*/, None)
-        ),
+        fts
+            .map_ok(move |f| format::format_forecast(&sub.name, sub.latitude, sub.longitude, &f, tz))
+            .and_then(move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None, None)),
         move |remove_id, add_id| {
             if let Some(msg_id) = remove_id {
                 future::Either::Left(tg_edit_kb(chat_id, msg_id, None))
@@ -108,8 +111,9 @@ use serde_derive::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone)]
 enum Mode {
-    Once,
-    Live,
+    Once(chrono::DateTime<chrono::Utc>),
+    Live(chrono::DateTime<chrono::Utc>),
+    Daily(u8, u8),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -120,7 +124,6 @@ pub struct Sub {
     pub latitude: f32,
     pub longitude: f32,
     name: Option<String>, // name for place/none if coords
-    target_time: chrono::DateTime<chrono::Utc>,
     mode: Mode,
 }
 
@@ -312,6 +315,61 @@ pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ym
         .collect()
 }
 
+struct WidgetState {
+    lat: f32,
+    lon: f32,
+    name: Option<String>,
+    tz: chrono_tz::Tz,
+    time: Option<Mode>,
+}
+
+impl WidgetState {
+    fn format(&self) -> String {
+        format!(
+            "місце: {}\nчасовий пояс: _{}_{}",
+            format::format_place_link(&self.name, self.lat, self.lon),
+            self.tz.name(),
+            match self.time {
+                Some(Mode::Once(datetime)) => {
+                    let local = datetime.with_timezone(&self.tz);
+                    format!("\nдата: *{}-{:02}-{:02}*\nчас: *{:02}:00*", local.year(), local.month(), local.day(), local.hour())
+                },
+                Some(Mode::Live(datetime)) => {
+                    let local = datetime.with_timezone(&self.tz);
+                    format!("\nдата: *{}-{:02}-{:02}*\nчас: *{:02}:00*", local.year(), local.month(), local.day(), local.hour())
+                },
+                Some(Mode::Daily(sendh, targeth)) => format!(
+                    "\nщодня о *{:02}:00*\nна *{:02}:00*{}",
+                    sendh, targeth, if sendh < targeth { " того ж дня" } else { " наступного дня" }
+                ),
+                None => String::default(),
+            }
+        )
+    }
+}
+
+fn process_mode_screen(chat_id: i64, widget_msg_id: i32, state: WidgetState) -> impl Future<Output=Result<Option<Mode>, String>> {
+    let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard: vec![
+        vec![telegram::TgInlineKeyboardButtonCB::new("поточний прогноз".to_owned(), "once".to_owned())],
+        vec![telegram::TgInlineKeyboardButtonCB::new("стежити за прогнозом".to_owned(), "live".to_owned())],
+        vec![telegram::TgInlineKeyboardButtonCB::new("прогноз щодня".to_owned(), /*"daily"*/PADDING_DATA.to_owned())],
+        make_cancel_row(),
+    ]};
+
+    tg_update_widget(chat_id, widget_msg_id, TgText::Markdown(state.format()), Some(keyboard))
+        .and_then(move |()|
+            UserClick::new(chat_id, widget_msg_id)
+                .map(|data| match data {
+                    Ok(m) if m == "once" => Ok(Some(Mode::Once(chrono::Utc::now() + chrono::Duration::hours(1)))),
+                    Ok(m) if m == "live" => Ok(Some(Mode::Live(chrono::Utc::now() + chrono::Duration::hours(1)))),
+                    Ok(m) if m == "daily" => Ok(Some(Mode::Daily(20, 8))),
+                    Ok(m) if m == CANCEL_DATA => Ok(None),
+                    Ok(m) => Err(format!("unexpected mode string `{}`", m)),
+                    Err(e) => Err(e),
+                })
+        )
+}
+
 fn process_widget(
     chat_id: i64, loc_msg_id: i32, target_lat: f32, target_lon: f32, name: Option<String>
 ) -> impl Future<Output=Result<(), String>> {
@@ -348,7 +406,7 @@ fn process_widget(
 
             let keyboard = telegram::TgInlineKeyboardMarkup{ inline_keyboard };
 
-            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), None/*Some(loc_msg_id)*/, Some(keyboard))
+            tg_send_widget(chat_id, TgText::Markdown(format!("{}\nоберіть дату:", widget_text)), None, Some(keyboard))
                 .and_then(move |msg_id|
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data| (widget_text, msg_id, days_map.remove(&data)))
@@ -408,11 +466,10 @@ fn process_widget(
                     UserClick::new(chat_id, msg_id)
                         .map_ok(move |data: String| {
                             match data.as_str() {
-                                "live" => Some(Mode::Live),
-                                "once" => Some(Mode::Once),
+                                "live" => Some(Mode::Live(target_time)),
+                                "once" => Some(Mode::Once(target_time)),
                                 _ => None,
                             }
-                            .map(|once| (once, target_time))
                         })
                         .map_ok(move |build| (widget_text, msg_id, build))
                 });
@@ -446,10 +503,10 @@ fn process_widget(
         })
         */
         .map_ok(move |(widget_text, msg_id, build)| {
-            (widget_text, msg_id, build.map(|(mode, target_time)| (target_time, name, mode)))
+            (widget_text, msg_id, build.map(|mode| (name, mode)))
         })
         .and_then(move |(widget_text, msg_id, build)| {
-            if let Some((target_time, name, mode)) = build {
+            if let Some((name, mode)) = build {
 
                 let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(format!("{}\nстан: *у роботі*", widget_text)), None)
                     .and_then(move |()| {
@@ -459,7 +516,7 @@ fn process_widget(
                             widget_message_id: msg_id,
                             latitude: target_lat,
                             longitude: target_lon,
-                            target_time, mode,
+                            mode,
                         };
                         monitor_weather_wrap(sub, tz).map_ok(move |status| (widget_text, msg_id, Some(status)) )
                     });
@@ -516,15 +573,9 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                     "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
                     _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
                 },
-            SeUpdateVariant::Location {location, msg_id} =>
-                if location.latitude > 29.5 && location.latitude < 70.5 && location.longitude > -23.5 && location.longitude < 45.0 {
-                    Box::new(process_widget(chat_id, msg_id, location.latitude, location.longitude, None))
-                } else {
-                    Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
-                }
-            SeUpdateVariant::OSMPlace {latitude, longitude, name, msg_id} =>
+            SeUpdateVariant::Place {latitude, longitude, name, msg_id} =>
                 if latitude > 29.5 && latitude < 70.5 && longitude > -23.5 && longitude < 45.0 {
-                    Box::new(process_widget(chat_id, msg_id, latitude, longitude, Some(name)))
+                    Box::new(process_widget(chat_id, msg_id, latitude, longitude, name))
                 } else {
                     Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
                 }
@@ -580,14 +631,10 @@ enum SeUpdateVariant {
         msg_id: i32,
         data: String,
     },
-    Location {
-        location: telegram::TgLocation,
-        msg_id: i32,
-    },
-    OSMPlace {
+    Place {
         latitude: f32,
         longitude: f32,
-        name: String,
+        name: Option<String>,
         msg_id: i32,
     },
     Command(String),
@@ -642,9 +689,15 @@ impl From<telegram::TgUpdate> for SeUpdate {
                     text: None,
                     entities: None,
                     location: Some(location),
+                    venue,
                 }),
                 callback_query: None,
-            }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Location {location, msg_id} },
+            }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Place {
+                latitude: location.latitude,
+                longitude: location.longitude,
+                name: venue.map(|v| v.title),
+                msg_id,
+            } },
 
             (None, None, telegram::TgUpdate {
                 message: None,
@@ -681,7 +734,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat {
-                chat_id, user, update: SeUpdateVariant::OSMPlace{latitude, longitude, name, msg_id}
+                chat_id, user, update: SeUpdateVariant::Place{latitude, longitude, name: Some(name), msg_id}
             },
 
             (Some(cmd), None, telegram::TgUpdate {
@@ -697,165 +750,5 @@ impl From<telegram::TgUpdate> for SeUpdate {
 
             (_, _, u) => SeUpdate::Other(u),
         }
-    }
-}
-
-#[test]
-fn tg_location() {
-    let t = r#"
-    {
-      "update_id": 14180656,
-      "message": {
-        "message_id": 2,
-        "from": {
-          "id": 54462285,
-          "is_bot": false,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "language_code": "en-UA"
-        },
-        "chat": {
-          "id": 54462285,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "type": "private"
-        },
-        "date": 1541198764,
-        "location": {
-          "latitude": 50.425195,
-          "longitude": 25.703556
-        }
-      }
-    }
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::Location {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::Location", u);
-    }
-}
-
-#[test]
-fn tg_start() {
-    let t = r#"
-    {
-      "update_id": 14180655,
-      "message": {
-        "message_id": 1,
-        "from": {
-          "id": 54462285,
-          "is_bot": false,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "chat": {
-          "id": 54462285,
-          "first_name": "Andriy",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys",
-          "type": "private"
-        },
-        "date": 1541198334,
-        "text": "/start",
-        "entities": [
-          {
-            "offset": 0,
-            "length": 6,
-            "type": "bot_command"
-          }
-        ]
-      }
-    }
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::Command {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::Command", u);
-    }
-}
-
-#[test]
-fn tg_cbq() {
-    let t = r#"
-{
-  "callback_query": {
-    "chat_instance": "8882132206646987846",
-    "data": "11.11",
-    "from": {
-      "first_name": "Andriy",
-      "id": 54462285,
-      "is_bot": false,
-      "language_code": "en-UA",
-      "last_name": "Chyvonomys",
-      "username": "chyvonomys"
-    },
-    "id": "233913736986880302",
-    "message": {
-      "chat": {
-        "first_name": "Andriy",
-        "id": 54462285,
-        "last_name": "Chyvonomys",
-        "type": "private",
-        "username": "chyvonomys"
-      },
-      "date": 1541890580,
-      "from": {
-        "first_name": "серпанок",
-        "id": 701332998,
-        "is_bot": true,
-        "username": "serpanok_bot"
-      },
-      "message_id": 115,
-      "reply_to_message": {
-        "chat": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "last_name": "Chyvonomys",
-          "type": "private",
-          "username": "chyvonomys"
-        },
-        "date": 1541890579,
-        "forward_date": 1541795230,
-        "forward_from": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "is_bot": false,
-          "language_code": "en-UA",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "from": {
-          "first_name": "Andriy",
-          "id": 54462285,
-          "is_bot": false,
-          "language_code": "en-UA",
-          "last_name": "Chyvonomys",
-          "username": "chyvonomys"
-        },
-        "location": {
-          "latitude": 50.610482,
-          "longitude": 26.341016
-        },
-        "message_id": 113
-      },
-      "text": "location: 50.610°N 26.341°E, pick a date (utc):"
-    }
-  },
-  "update_id": 14180731
-}
-"#;
-
-    let u = serde_json::from_str::<telegram::TgUpdate>(t).map(|u| SeUpdate::from(u));
-
-    if let Ok(SeUpdate::PrivateChat {update: SeUpdateVariant::CBQ {..}, .. }) = u {
-    } else {
-        panic!("{:#?}, should be SeUpdate::CBQ", u);
     }
 }

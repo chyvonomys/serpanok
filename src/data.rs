@@ -191,7 +191,7 @@ impl ParameterFlags {
             precip: false,
             rain: true,
             snow: true,
-            depth: false,
+            depth: true,
         }
     }
 }
@@ -290,7 +290,7 @@ pub struct Forecast {
     pub total_precip_accum: Option<(f32, f32)>,
     pub rain_accum: Option<(f32, f32)>,
     pub snow_accum: Option<(f32, f32)>,
-    pub snow_depth: Option<(f32)>,
+    pub snow_depth: Option<f32>,
 }
 
 pub fn forecast_stream(
