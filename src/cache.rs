@@ -1,4 +1,4 @@
-use super::{FileKey, TaggedLog};
+use super::{FileKey, TaggedLog, DebugRFC3339};
 use crate::icon;
 use crate::grib;
 use std::sync::Arc;
@@ -161,7 +161,7 @@ fn download_grid_fut(
     };
 
     log.add_line(&format!("file should be available from {} to {}, (now {}, so `{}`)",
-                from.to_rfc3339(), to.to_rfc3339(), now.to_rfc3339(), desc
+                from.to_rfc3339_debug(), to.to_rfc3339_debug(), now.to_rfc3339_debug(), desc
     ));
 
     let res: Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> =
@@ -177,7 +177,7 @@ fn download_grid_fut(
             stream::iter(attempt_schedule)
                 .then({ let log = log.clone(); move |t| {
                     let now = chrono::Utc::now();
-                    log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339(), now.to_rfc3339()));
+                    log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339_debug(), now.to_rfc3339_debug()));
                     let wait = if t > now {
                         t - now
                     } else {

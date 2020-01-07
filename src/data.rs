@@ -1,4 +1,4 @@
-use super::{Parameter, FileKey, TaggedLog};
+use super::{Parameter, FileKey, TaggedLog, DebugRFC3339};
 use crate::cache;
 use crate::icon; // TODO:
 use crate::grib;
@@ -259,9 +259,13 @@ where
     let fs: Vec<_> = forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter).collect();
 
     stream::unfold(fs, |mut fs| future::ready( fs.pop().map(|x| (x, fs)) ) )
-        .skip_while(move |(mrt, _, _, _, _, _)| future::ready(now < *mrt))
+        .skip_while(move |(mrt, _, _, _, _, _)| {
+            let skip = now < *mrt;
+            println!("mrt={}, now={}, skip={}", mrt.to_rfc3339_debug(), now.to_rfc3339_debug(), skip);
+            future::ready(skip)
+        })
         .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
-            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
+            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
             let log = log.clone();
             tokio::time::timeout(try_timeout, try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)))
                 .then(move |v: Result<Result<Forecast, String>, tokio::time::Elapsed>| {
@@ -301,7 +305,7 @@ pub fn forecast_stream(
         .map_ok(move |f| {
             stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
                 .then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
-                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1));
+                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
                     fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), ParameterFlags::default1())
                 }})
                 .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))

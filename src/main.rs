@@ -69,9 +69,19 @@ pub struct TaggedLog {
     tag: String,
 }
 
+trait DebugRFC3339 {
+    fn to_rfc3339_debug(&self) -> String;
+}
+
+impl DebugRFC3339 for chrono::DateTime<chrono::Utc> {
+    fn to_rfc3339_debug(&self) -> String {
+        self.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+}
+
 impl TaggedLog {
     fn add_line(&self, s: &str) {
-        println!("[{}] {} {}", chrono::Utc::now().to_rfc3339(), &self.tag, s);
+        println!("[{}] {} {}", chrono::Utc::now().to_rfc3339_debug(), &self.tag, s);
     }
 }
 
@@ -208,13 +218,14 @@ fn serpanok_api(
                 .unwrap_or_else(chrono::Utc::now);
             let mut res = String::new();
             res.push_str("----------------------------\n");
-            res.push_str(&format!("start: {}\n", start_time.to_rfc3339()));
-            res.push_str(&format!("now: {}\n", chrono::Utc::now().to_rfc3339()));
-            res.push_str(&format!("target: {}\n", target_time.to_rfc3339()));
+            res.push_str(&format!("start:  {}\n", start_time.to_rfc3339_debug()));
+            res.push_str(&format!("now:    {}\n", chrono::Utc::now().to_rfc3339_debug()));
+            res.push_str(&format!("target: {}\n", target_time.to_rfc3339_debug()));
             res.push_str("----------------------------\n");
             let body = data::forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter)
-                .map(|(mrt, mr, ft, ts, ft1, ts1)| format!("* {}/{:02} >> {}/{:03}  add {}/{:03}\n",
-                                                           mrt.to_rfc3339(), mr, ft.to_rfc3339(), ts, ft1.to_rfc3339(), ts1
+                .map(|(mrt, mr, ft, ts, ft1, ts1)| format!(
+                    "* {}/{:02} >> {}/{:03}  add {}/{:03}\n",
+                    mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1
                 ))
                 .fold(res, |mut acc, x| {acc.push_str(&x); acc});
             Box::new(future::ok(hresp(200, body, "text/plain")))
