@@ -274,17 +274,21 @@ pub fn get_updates(last: Option<i32>) -> impl Future<Output=Result<Vec<(Option<i
     ))
 }
 
-pub fn tg_call<S, R>(call: &'static str, payload: S) -> impl Future<Output=Result<R, String>>
+#[derive(Debug)]
+pub enum TgCallError {
+    PostError(String),
+    JsonError(String),
+    ApiError(String),
+}
+
+pub fn tg_call<S, R>(call: &'static str, payload: S) -> impl Future<Output=Result<R, TgCallError>>
 where S: serde::Serialize, R: serde::de::DeserializeOwned {
     let url = format!("https://api.telegram.org/bot{}/{}", BOTTOKEN.as_str(), call);
     let json = serde_json::to_string(&payload).unwrap();
-    http_post_json(url, json).and_then(|(ok, body)| future::ready(
-        if ok {
+    http_post_json(url, json).map_err(TgCallError::PostError)
+        .and_then(|(_ok, body)| future::ready(
             serde_json::from_reader::<_, TgResponse<R>>(std::io::Cursor::new(body))
-                .map_err(|e| format!("parse response error: {}", e.to_string()))
-                .and_then(|resp| resp.into_result())
-        } else {
-            Err(format!("ok: {:?}, body: {:?}", ok, String::from_utf8(body)))
-        }
-    ))
+                .map_err(|e| TgCallError::JsonError(e.to_string()))
+                .and_then(|resp| resp.into_result().map_err(TgCallError::ApiError))
+        ))
 }

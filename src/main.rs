@@ -1,3 +1,4 @@
+#![type_length_limit="3000000"]
 use std::io::Read;
 use chrono::{Datelike, Timelike, TimeZone};
 use serde_derive::Serialize;
