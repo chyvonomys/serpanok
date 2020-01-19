@@ -52,13 +52,15 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let log = Arc::new(TaggedLog {tag: format!("{}:{}", chat_id, widget_msg_id)});
 
     let fts = match sub.mode {
-        Mode::Daily(_sendh, _targeth) => future::Either::Left(stream::empty()),
-        Mode::Once(target_time) => future::Either::Right(
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params.clone()).take(1)
-        ),
-        Mode::Live(target_time) => future::Either::Right(
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params.clone()).take(1000)
-        ),
+        Mode::Daily(sendh, targeth) =>
+            data::daily_forecast_stream(log.clone(), sub.latitude, sub.longitude, sendh, targeth, tz, sub.params)
+                .left_stream(),
+        Mode::Once(target_time) =>
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
+                .take(1).right_stream(),
+        Mode::Live(target_time) =>
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
+                .take(1000).right_stream(),
     };
 
     let f = iter_cancel(
