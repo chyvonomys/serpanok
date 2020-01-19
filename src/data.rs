@@ -3,7 +3,7 @@ use crate::cache;
 use crate::icon; // TODO:
 use crate::grib;
 use std::sync::Arc;
-use chrono::Timelike;
+use chrono::{Timelike, TimeZone};
 use futures::{stream, Stream, StreamExt, TryStreamExt, future, Future, FutureExt, TryFutureExt};
 use itertools::Itertools; // tuple_windows, collect_vec
 
@@ -313,4 +313,48 @@ pub fn forecast_stream(
                 .filter_map(|item: Result<_, String>| future::ready(item.ok())) // drop errors
         })
         .try_flatten_stream()
+}
+
+pub fn daily_iterator(
+    start_time: chrono::DateTime<chrono::Utc>, h0: u32, mut h1: u32, tz: chrono_tz::Tz
+) -> impl Iterator<Item=(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+
+    let start_tz = tz.from_utc_datetime(&start_time.naive_utc());
+    let start_tz_trunc = start_tz.date().and_hms(0, 0, 0);
+
+    if h1 <= h0 {
+        h1 += 24;
+    }
+
+    (0..).map(move |i| {
+        let send   = (start_tz_trunc + chrono::Duration::hours(i64::from(24 * i + h0)))
+            .date().and_hms_opt(h0 % 24, 0, 0)
+            .map(|t| chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc));
+
+        let target = (start_tz_trunc + chrono::Duration::hours(i64::from(24 * i + h1)))
+            .date().and_hms_opt(h1 % 24, 0, 0)
+            .map(|t| chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc));
+
+        (send, target)
+    }).filter_map(move |p|
+        match p {
+            (Some(s), Some(t)) if s > start_time => Some((s, t)),
+            _ => None,
+        }
+    )
+}
+
+pub fn daily_forecast_stream(
+    log: Arc<TaggedLog>, lat: f32, lon: f32, sendh: u32, targeth: u32, tz: chrono_tz::Tz
+) -> impl Stream<Item=Result<Forecast, String>> {
+    stream::iter(daily_iterator(chrono::Utc::now(), sendh, targeth, tz))
+        .then(move |(at, target)| {
+            let dur = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+            tokio::time::delay_for(dur)
+                .then({ let log = log.clone(); move |()|
+                    forecast_stream(log, lat, lon, target)
+                        .into_future()
+                        .map(|(head, _tail)| head.unwrap_or_else(|| Err("empty daily stream".to_owned())))
+                })
+        })
 }

@@ -334,6 +334,39 @@ fn serpanok_api(
             }
             Box::new(future::ok(hresp(200, result, "text/plain")))
         },
+        (&hyper::Method::GET, "/daily") => {
+            let start_utc = params.get("start")
+                .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
+                .map(|f| f.into())
+                .unwrap_or_else(chrono::Utc::now);
+            let sendh = params.get("sendh").and_then(|q| q.parse::<u32>().ok()).unwrap_or(20);
+            let targeth = params.get("targeth").and_then(|q| q.parse::<u32>().ok()).unwrap_or(8);
+            let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
+            let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
+            let tz = lookup_tz(lat, lon);
+            let start_tz = tz.from_utc_datetime(&start_utc.naive_utc());
+            let text = data::daily_iterator(start_utc, sendh, targeth, tz)
+                .take(10)
+                .fold(
+                    format!(
+                        "start_utc={}\nstart_tz={}\nschedule={:02}->{:02}\n",
+                        start_utc.to_rfc3339_debug(), start_tz.to_rfc3339(),
+                        sendh, targeth
+                    ),
+                    |mut acc, (at, ta)| {
+                        acc.push_str(&tz.from_utc_datetime(&at.naive_utc()).to_rfc3339());
+                        acc.push_str("/");
+                        acc.push_str(&at.to_rfc3339_debug());
+                        acc.push_str(" -> ");
+                        acc.push_str(&tz.from_utc_datetime(&ta.naive_utc()).to_rfc3339());
+                        acc.push_str("/");
+                        acc.push_str(&ta.to_rfc3339_debug());
+                        acc.push_str("\n");
+                        acc
+                    }
+                );
+            Box::new(future::ok(hresp(200, text, "text/plain")))
+        },
         (&hyper::Method::GET, "/query") => {
             let target = params.get("target")
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
