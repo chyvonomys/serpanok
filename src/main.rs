@@ -1,4 +1,3 @@
-#![type_length_limit="3000000"]
 use std::io::Read;
 use chrono::{Datelike, Timelike, TimeZone};
 use serde_derive::Serialize;
@@ -343,7 +342,7 @@ fn serpanok_api(
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
             let tz = lookup_tz(lat, lon);
             let log = std::sync::Arc::new(TaggedLog {tag: "=query=".to_owned()});
-            let f = data::forecast_stream(log, lat, lon, target).into_future()
+            let f = data::forecast_stream(log, lat, lon, target, data::ParameterFlags::default()).into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
                 .map_ok(move |f| format::format_forecast(&None, lat, lon, &f, tz))

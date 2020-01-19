@@ -54,10 +54,10 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let fts = match sub.mode {
         Mode::Daily(_sendh, _targeth) => future::Either::Left(stream::empty()),
         Mode::Once(target_time) => future::Either::Right(
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time).take(1)
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params.clone()).take(1)
         ),
         Mode::Live(target_time) => future::Either::Right(
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time).take(1000)
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params.clone()).take(1000)
         ),
     };
 
@@ -77,7 +77,7 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
             )
         },
     )
-        .try_fold(0, |n, _| future::ok::<_, String>(n+1))
+        .try_fold(0, move |n, _msg_id| future::ok(n+1))
         .inspect_ok(move |n| log.add_line(&format!("done: {} updates", n)))
         .map_err(|e| format!("subscription future error: {}", e))
         .then(move |x| {SUBS.lock().unwrap().remove(&key); future::ready(x)});
@@ -116,6 +116,7 @@ pub struct Sub {
     pub longitude: f32,
     name: Option<String>, // name for place/none if coords
     mode: Mode,
+    params: data::ParameterFlags,
 }
 
 #[allow(dead_code)]
@@ -233,7 +234,7 @@ impl Future for UserClick {
         self.rx.poll_unpin(cx)
     }
 }
-/*
+
 struct UserInput {
     chat_id: i64,
     rx: Box<dyn Future<Output=Result<String, String>> + Send + Unpin>,
@@ -271,7 +272,7 @@ impl Future for UserInput {
         self.rx.poll_unpin(cx)
     }
 }
-*/
+
 type Ymd = (i32, u32, u32);
 type PickerCell = Option<(u32, chrono::DateTime<chrono::Utc>)>;
 
@@ -310,6 +311,7 @@ struct WidgetState {
     lon: f32,
     name: Option<String>,
     tz: chrono_tz::Tz,
+    params: data::ParameterFlags,
 }
 
 fn format_widget_text(state: &WidgetState, time: Option<&Mode>) -> TgText {
@@ -425,6 +427,10 @@ fn btn(label: &str, data: &str) -> telegram::TgInlineKeyboardButtonCB {
     telegram::TgInlineKeyboardButtonCB::new(label.to_owned(), data.to_owned())
 }
 
+fn opt_btn(label: &str, on: bool, data: &str) -> telegram::TgInlineKeyboardButtonCB {
+    telegram::TgInlineKeyboardButtonCB::new(format!("{} {}", label, if on { "\u{1F508}" } else { "\u{1F507}" }), data.to_owned())
+}
+
 fn pick_datetime(
     chat_id: i64, widget_msg_id: i32, state: &WidgetState
 ) -> impl Future<Output=Result<Option<chrono::DateTime<chrono::Utc>>, String>> {
@@ -459,7 +465,7 @@ enum Adjust<T> {
 }
 
 impl<T> Adjust<T> {
-    fn unwrap(self) -> T {
+    fn either(self) -> T {
         match self {
             Self::Changed(x) => x,
             Self::Same(x) => x,
@@ -493,6 +499,37 @@ fn adjust_mode(
                 })
                 .right_future(),
     }
+}
+
+fn adjust_name(chat_id: i64, widget_msg_id: i32, name: Option<String>) -> impl Future<Output=Result<Adjust<Option<String>>, String>> {
+
+    let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![vec![btn("залишити як є", CANCEL_DATA)]] };
+
+    tg_edit_kb(chat_id, widget_msg_id, Some(keyboard))
+        .and_then(move |()| {
+            futures::future::try_select(
+                UserInput::new(chat_id).map_ok(|s| Adjust::Changed(Some(s))),
+                UserClick::new(chat_id, widget_msg_id).map_ok(|_d| Adjust::Same(name))
+            )
+            .map_ok(|p| p.factor_first().0)
+            .map_err(|p| p.factor_first().0)
+        })
+        .and_then(move |adj| tg_edit_kb(chat_id, widget_msg_id, None).map_ok(|_| adj))
+}
+
+fn adjust_params(
+    chat_id: i64, widget_msg_id: i32, params: data::ParameterFlags
+) -> impl Future<Output=Result<Adjust<data::ParameterFlags>, String>> {
+
+    let kb = vec![
+        vec![opt_btn("t повітря", true, PADDING_DATA), opt_btn("шар снігу", params.depth, PADDING_DATA)],
+        vec![opt_btn("дощ", params.rain, PADDING_DATA), opt_btn("сніг", params.snow, PADDING_DATA)],
+        vec![opt_btn("хмарність", params.tcc, PADDING_DATA), opt_btn("вітер", params.wind, PADDING_DATA)],
+        vec![btn("OK", "ok")],
+    ];
+
+    keyboard_input(chat_id, widget_msg_id, kb)
+        .and_then(move |_d| future::ok(Adjust::Same(params))) // TODO:
 }
 
 enum Loop<T> {
@@ -546,7 +583,8 @@ fn config_screen(
 
     let kb = vec![
         vec![btn("змінити дату/час", "tm")],
-        vec![btn("змінити назву", PADDING_DATA)],
+        vec![btn("змінити назву", "nm")],
+        vec![btn("вибрати параметри", "pr")],
         vec![btn("ок", "ok"), btn("скасувати", CANCEL_DATA)],
     ];
 
@@ -554,27 +592,30 @@ fn config_screen(
 
     tg_update_widget(chat_id, widget_msg_id, text, None)
         .and_then(move |()| keyboard_input(chat_id, widget_msg_id, kb)
-            .and_then(move |data|
-                match data.as_str() {
-                    "tm" => adjust_mode(chat_id, widget_msg_id, &state, mode)
-                        .map_ok(|adj| Loop::Continue(Some(adj.unwrap())))
-                        .left_future(),
-                    "ok" => future::ok(Loop::Break(Some(mode)))
-                        .right_future(),
-                    CANCEL_DATA => future::ok(Loop::Break(None))
-                        .right_future(),
-                    d => future::err(format!("unexpected config choice `{}`", d))
-                        .right_future(),
-                }
-                .map_ok(move |l| l.map(|x| (state, x)))
-            )
+            .and_then(move |data| {
+                let f: Box<dyn Future<Output=Result<Loop<(_, _)>, String>> + Unpin + Send> = match data.as_str() {
+                    "tm" => Box::new(adjust_mode(chat_id, widget_msg_id, &state, mode)
+                        .map_ok(|adj| Loop::Continue( (state, Some(adj.either())) ))
+                    ),
+                    "nm" => Box::new(adjust_name(chat_id, widget_msg_id, state.name.clone())
+                        .map_ok(move |adj| Loop::Continue( (WidgetState{ name: adj.either(), ..state }, Some(mode)) ))
+                    ),
+                    "pr" => Box::new(adjust_params(chat_id, widget_msg_id, state.params)
+                        .map_ok(move |adj| Loop::Continue( (WidgetState{ params: adj.either(), ..state }, Some(mode)) ))
+                    ),
+                    "ok" => Box::new(future::ok(Loop::Break( (state, Some(mode)) ))),
+                    CANCEL_DATA => Box::new(future::ok(Loop::Break( (state, None) ))),
+                    d => Box::new(future::err(format!("unexpected config choice `{}`", d))),
+                };
+                f
+            })
         )
 }
 
 fn process_widget(chat_id: i64, lat: f32, lon: f32, name: Option<String>) -> impl Future<Output=Result<(), String>> {
 
     let state = WidgetState {
-        lat, lon, name, tz: lookup_tz(lat, lon)
+        lat, lon, name, tz: lookup_tz(lat, lon), params: data::ParameterFlags::default()
     };
 
     let text = format_widget_text(&state, None);
@@ -593,7 +634,7 @@ fn process_widget(chat_id: i64, lat: f32, lon: f32, name: Option<String>) -> imp
                             widget_message_id: widget_msg_id,
                             latitude: state.lat,
                             longitude: state.lon,
-                            mode,
+                            mode, params: state.params,
                         };
                         monitor_weather_wrap(sub, state.tz)
                     }),
@@ -607,30 +648,6 @@ fn process_widget(chat_id: i64, lat: f32, lon: f32, name: Option<String>) -> imp
                         .map_ok(|_| ())
                 })
         })
-        /*
-        .and_then(move |(widget_text, msg_id, build)| match build {
-            Some((true, target_time)) => {
-                let t = (widget_text, msg_id, Some((target_time, None)));
-                future::Either::Left(future::Either::Left(future::ok(t)))
-            },
-            Some((false, target_time)) => {
-                let keyboard = telegram::TgInlineKeyboardMarkup { inline_keyboard: vec![make_cancel_row()] };
-                let text = format!("{}\nдайте назву цьому спостереженню:", widget_text);
-
-                let f = tg_update_widget(chat_id, msg_id, TgText::Markdown(text), Some(keyboard))
-                    .and_then(move |()| {
-                        futures::future::try_select(
-                            UserInput::new(chat_id).map_ok(move |name| Some((target_time, Some(name)))),
-                            UserClick::new(chat_id, msg_id).map_ok(move |_| None)
-                        )
-                            .map_ok(move |e| (widget_text, msg_id, e.factor_first().0))
-                            .map_err(|e| e.factor_first().0)
-                    });
-                future::Either::Left(future::Either::Right(f))
-            },
-            None => future::Either::Right(future::ok((widget_text, msg_id, None))),
-        })
-        */
 }
 
 pub fn process_update(tgu: telegram::TgUpdate) -> impl Future<Output=Result<(), String>> {
@@ -685,13 +702,10 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                     Box::new(tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
                              .map_err(|e| format!("answer cbq error: {}", e.to_string())))
                 },
-            SeUpdateVariant::Text(_) => {
-                /*
+            SeUpdateVariant::Text(text) => {
                 let ok = UserInput::input(chat_id, text)
                     .map_err(|e| println!("text {} error: {}", chat_id, e))
                     .is_ok();
-                */
-                let ok = false;
 
                 if ok {
                     Box::new(future::ok( () ))

@@ -174,24 +174,27 @@ where FN: FnOnce() -> F, F: Future<Output=Result<I, String>> {
 type ModelrunSpec = (chrono::Date<chrono::Utc>, u8);
 type TimestepSpec = (chrono::DateTime<chrono::Utc>, u8);
 
-struct ParameterFlags {
-    tcc: bool,
-    wind: bool,
-    precip: bool,
-    rain: bool,
-    snow: bool,
-    depth: bool,
+use serde_derive::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct ParameterFlags {
+    pub tcc: bool,
+    pub wind: bool,
+    pub precip: bool,
+    pub rain: bool,
+    pub snow: bool,
+    pub depth: bool,
 }
 
-impl ParameterFlags {
-    fn default1() -> Self {
+impl Default for ParameterFlags {
+    fn default() -> Self {
         Self {
             tcc: true,
             wind: true,
             precip: false,
             rain: true,
             snow: true,
-            depth: true,
+            depth: false,
         }
     }
 }
@@ -294,19 +297,19 @@ pub struct Forecast {
 }
 
 pub fn forecast_stream(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>
+    log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>, params: ParameterFlags
 ) -> impl Stream<Item=Result<Forecast, String>> {
 
     select_start_time(
         log.clone(), target_time,
-        move |log, (mrt, mr, ft, ts, ft1, ts1)| fetch_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), ParameterFlags::default1()),
+        move |log, (mrt, mr, ft, ts, ft1, ts1)| fetch_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params),
         std::time::Duration::from_secs(7)
     )
         .map_ok(move |f| {
             stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
                 .then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
                     log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
-                    fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), ParameterFlags::default1())
+                    fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
                 }})
                 .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
                 .then(future::ok) // stream of values --> stream of results
