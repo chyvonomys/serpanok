@@ -112,7 +112,6 @@ fn http_post_json(url: String, json: String) -> impl Future<Output=Result<(bool,
         .request(req)
         .map_err(move |e| format!("POST {} failed: {}", url, e))
         .and_then(fold_response_body)
-        .map_err(|e| format!("botapi response error: {}", e))
 }
 
 fn http_get(url: String) -> impl Future<Output=Result<(bool, Vec<u8>), String>> {
@@ -124,7 +123,17 @@ fn http_get(url: String) -> impl Future<Output=Result<(bool, Vec<u8>), String>> 
         .request(req)
         .map_err(move |e| format!("GET {} failed: {}", url, e))
         .and_then(fold_response_body)
-        .map_err(|e| format!("botapi response error: {}", e))
+}
+
+fn http_head(url: String) -> impl Future<Output=Result<bool, String>> {
+    let req = hyper::Request::head(&url)
+        .body(hyper::Body::from(""))
+        .unwrap_or_else(|_| panic!("HEAD request build failed for {}", &url));
+
+    HTTP_CLIENT
+        .request(req)
+        .map_err(move |e| format!("HEAD {} failed: {}", url, e))
+        .map_ok(|resp| resp.status() == hyper::StatusCode::OK)
 }
 
 fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=Result<Vec<u8>, String>> {
@@ -132,6 +141,17 @@ fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=
     http_get(url).and_then(|(ok, body)|
         if ok {
             future::Either::Left(future::ok(body))
+        } else {
+            future::Either::Right(future::err("response status is not OK".to_string()))
+        }
+    )
+}
+
+fn avail_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=Result<(), String>> {
+    log.add_line(&format!("HEAD {}", url));
+    http_head(url).and_then(|ok|
+        if ok {
+            future::Either::Left(future::ok( () ))
         } else {
             future::Either::Right(future::err("response status is not OK".to_string()))
         }

@@ -1,5 +1,5 @@
 use super::{Parameter, FileKey, TaggedLog};
-use super::{fetch_url, unpack_bzip2};
+use super::{fetch_url, avail_url, unpack_bzip2};
 use crate::grib;
 use futures::{Future, TryFutureExt};
 
@@ -110,6 +110,10 @@ impl IconFile {
     pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<Vec<u8>, String>> {
         fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename))
             .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
+    }
+
+    pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
+        avail_url(log, format!("{}{}.bz2", self.prefix, self.filename))
     }
 
     pub fn available_from(&self) -> chrono::DateTime<chrono::Utc> {

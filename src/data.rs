@@ -141,6 +141,18 @@ fn extract_value_at(grib: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32,
     .and_then(|ys| extract_value_impl(&ys, &grib.section3, lat, lon))
 }
 
+fn avail_value(
+    log: Arc<TaggedLog>,
+    param: Parameter,
+    _lat: f32, _lon: f32,
+    modelrun: ModelrunSpec,
+    timestep: u8,
+) -> impl Future<Output=Result<(), String>> {
+    let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
+    cache::avail_grid(log, file_key)
+        .map_err(|e| format!("avail_value error: {}", e))
+}
+
 fn fetch_value(
     log: Arc<TaggedLog>,
     param: Parameter,
@@ -199,6 +211,48 @@ impl Default for ParameterFlags {
     }
 }
 
+fn avail_all(
+    log: Arc<TaggedLog>, lat: f32, lon: f32, mr: ModelrunSpec, t0: TimestepSpec, t1: TimestepSpec, params: ParameterFlags
+) -> std::pin::Pin<Box<dyn Future<Output=Result<(), String>> + Send>> {
+
+    let log1 = log.clone();
+    let log2 = log.clone();
+    let log3 = log.clone();
+    let log4 = log.clone();
+    let log5 = log.clone();
+    let ts = t0.1;
+    let ts1 = t1.1;
+    let f = future::try_join4(
+        avail_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
+        opt_wrap(params.tcc, move || avail_value(log1, Parameter::TotalCloudCover, lat, lon, mr, ts)),
+        opt_wrap(params.wind, move || future::try_join(
+            avail_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
+            avail_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
+        )),
+        future::try_join4(
+            opt_wrap(params.precip, move || future::try_join(
+                avail_value(log3.clone(), Parameter::TotalAccumPrecip, lat, lon, mr, ts),
+                avail_value(log3, Parameter::TotalAccumPrecip, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.rain, move || future::try_join4(
+                avail_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts),
+                avail_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts1),
+                avail_value(log4.clone(), Parameter::ConvectiveRain, lat, lon, mr, ts),
+                avail_value(log4, Parameter::ConvectiveRain, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.snow, move || future::try_join4(
+                avail_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts),
+                avail_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts1),
+                avail_value(log5.clone(), Parameter::ConvectiveSnow, lat, lon, mr, ts),
+                avail_value(log5, Parameter::ConvectiveSnow, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.depth, move || avail_value(log, Parameter::SnowDepth, lat, lon, mr, ts)),
+        ),
+    )
+    .map_ok(move |_| ());
+    Box::pin(f)
+}
+
 fn fetch_all(
     log: Arc<TaggedLog>, lat: f32, lon: f32, mr: ModelrunSpec, t0: TimestepSpec, t1: TimestepSpec, params: ParameterFlags
 ) -> std::pin::Pin<Box<dyn Future<Output=Result<Forecast, String>> + Send>> {
@@ -251,11 +305,11 @@ fn fetch_all(
 }
 
 fn select_start_time<F, R>(
-    log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F, try_timeout: std::time::Duration
+    log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F
 ) -> impl Future<Output=Result<chrono::DateTime<chrono::Utc>, String>>
 where
     F: Fn(Arc<TaggedLog>, (chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8)) -> R,
-    R: Future<Output=Result<Forecast, String>> + Unpin,
+    R: Future<Output=Result<(), String>> + Unpin,
 {
     let now = chrono::Utc::now();
     let start_time = now - chrono::Duration::hours(12);
@@ -270,12 +324,11 @@ where
         .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
             log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
             let log = log.clone();
-            tokio::time::timeout(try_timeout, try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1)))
-                .then(move |v: Result<Result<Forecast, String>, tokio::time::Elapsed>| {
+            try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1))
+                .then(move |v: Result<(), String>| {
                     let res = match v {
-                        Ok(Ok(_f)) => Some(mrt),
-                        Ok(Err(s)) => { log.add_line(&format!("failed with: {}", s)); None },
-                        Err(e) => { log.add_line(&format!("took too long, {}, {:?}", e, try_timeout)); None },
+                        Ok( () ) => Some(mrt),
+                        Err(s) => { log.add_line(&format!("failed with: {}", s)); None },
                     };
                     future::ready(res)
                 })
@@ -302,20 +355,19 @@ pub fn forecast_stream(
 
     select_start_time(
         log.clone(), target_time,
-        move |log, (mrt, mr, ft, ts, ft1, ts1)| fetch_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params),
-        std::time::Duration::from_secs(7)
+        move |log, (mrt, mr, ft, ts, ft1, ts1)| avail_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
     )
-        .map_ok(move |f| {
-            stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
-                .then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
-                    log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
-                    fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
-                }})
-                .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
-                .then(future::ok) // stream of values --> stream of results
-                .filter_map(|item: Result<_, String>| future::ready(item.ok())) // drop errors
-        })
-        .try_flatten_stream()
+    .map_ok(move |f| {
+        stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
+            .then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
+                log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
+                fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
+            }})
+            .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
+            .then(future::ok) // stream of values --> stream of results
+            .filter_map(|item: Result<_, String>| future::ready(item.ok())) // drop errors
+    })
+    .try_flatten_stream()
 }
 
 pub fn daily_iterator(

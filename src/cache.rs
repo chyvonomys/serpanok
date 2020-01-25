@@ -84,6 +84,20 @@ pub fn stats() -> CacheStats {
     }
 }
 
+pub fn avail_grid(
+    log: Arc<TaggedLog>, file_key: FileKey
+) -> impl Future<Output=Result<(), String>> {
+    if let Some((_, sh)) = MEM_CACHE.lock().unwrap().get(&file_key) {
+        match sh.peek() {
+            Some(Ok(_)) => future::ok( () ).left_future(),
+            Some(Err(e)) => future::err(e.clone()).left_future(),
+            None => make_avail_grid_fut(log, file_key).right_future(),
+        }
+    } else {
+        make_avail_grid_fut(log, file_key).right_future()
+    }
+}
+
 pub fn fetch_grid(
     log: Arc<TaggedLog>, file_key: FileKey
 ) -> impl Future<Output=Result<Arc<grib::GribMessage>, String>> {
@@ -153,14 +167,14 @@ fn download_grid_fut(
     let now = chrono::Utc::now();
 
     let (desc, action) = if now < from {
-        ("wait until model runs and files appear", Some((from, to)))
+        ("NOT YET", Some((from, to)))
     } else if now >= from && now < to {
-        ("model has run, poll while makes sense", Some((now, to)))
+        ("LET'S GO", Some((now, to)))
     } else {
-        ("too old, skip, go to next", None)
+        ("TOO OLD", None)
     };
 
-    log.add_line(&format!("file should be available from {} to {}, (now {}, so `{}`)",
+    log.add_line(&format!("avail from {} to {}, (now {}, so `{}`)",
                 from.to_rfc3339_debug(), to.to_rfc3339_debug(), now.to_rfc3339_debug(), desc
     ));
 
@@ -178,25 +192,47 @@ fn download_grid_fut(
                 .then({ let log = log.clone(); move |t| {
                     let now = chrono::Utc::now();
                     log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339_debug(), now.to_rfc3339_debug()));
-                    let wait = if t > now {
-                        t - now
+                    
+                    if t > now {
+                        tokio::time::delay_for((t - now).to_std().unwrap()).left_future()
                     } else {
-                        chrono::Duration::seconds(0)
-                    };
-
-                    // TODO: skip 0-wait?
-
-                    tokio::time::delay_for(wait.to_std().unwrap())
-                        .then({
-                            let log = log.clone(); let icon_file = icon_file.clone();
-                            move |_| icon_file.fetch_bytes(log)
-                        })
+                        future::ready( () ).right_future()
+                    }
+                    .then({
+                        let log = log.clone(); let icon_file = icon_file.clone();
+                        move |()| icon_file.fetch_bytes(log)
+                    })
                 }})
-                .inspect_err(move |e| log.add_line(&format!("inspect err: {}", e)))
+                .inspect_err(move |e| log.add_line(&format!("attempt stream err: {}", e)))
                 .filter_map(|item: Result<Vec<u8>, String>| future::ready(item.ok()))
                 .into_future()
                 .then(|x: (Option<Vec<u8>>, _)| future::ready(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
         })
+}
+
+fn make_avail_grid_fut(
+    log: Arc<TaggedLog>, file_key: FileKey
+) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
+    let icon_file = Arc::new(icon::IconFile::new(file_key.clone()));
+    let path = icon_file.cache_filename().to_owned();
+
+    log.add_line(&format!("avail grid: {}...", &path));
+
+    let res = std::fs::File::open(&path)
+        .map_err(|e| format!("file open failed: {}", e))
+        .map(|_| {
+            log.add_line("cache hit!");
+            ()
+        });
+
+    let fut = future::ready(res) // TODO:
+        .or_else(move |e: String| {
+            let log = log.clone();
+            log.add_line(&format!("cache miss: {}", &e));
+            icon_file.check_avail(log)
+        });
+
+    Box::new(fut)
 }
 
 fn make_fetch_grid_fut(
