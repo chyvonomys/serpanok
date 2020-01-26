@@ -201,7 +201,7 @@ where T: Into<hyper::Body> {
 }
 
 fn serpanok_api(
-    exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>
+    exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>,
 ) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send + Unpin> {
     println!("request: {} {}", req.method(), req.uri());
     let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
@@ -413,10 +413,10 @@ fn serpanok_api(
     }
 }
 
-fn forward_updates(url: String) -> impl Future<Output=()> {
+fn forward_updates(url: String, interval: u64) -> impl Future<Output=()> {
     stream::iter(0..)
-        .then(|_i|
-            tokio::time::delay_for(std::time::Duration::from_secs(3)).map(Ok)
+        .then(move |_i|
+            tokio::time::delay_for(std::time::Duration::from_secs(interval)).map(Ok)
         )
         .try_fold(None, move |last_id, ()|
             telegram::get_updates(last_id)
@@ -441,25 +441,65 @@ fn forward_updates(url: String) -> impl Future<Output=()> {
 }
 
 fn main() {
+    let clmatches = clap::App::new("serpanok bot")
+        .arg(clap::Arg::with_name("bot_token")
+            .short("t").takes_value(true).required(true)
+            .help("Telegram Bot API token (required)")
+        )
+        .arg(clap::Arg::with_name("bind_addr")
+            .short("a").takes_value(true).default_value("127.0.0.1:8778")
+            .help("Address to start HTTP server at")
+        )
+        .arg(clap::Arg::with_name("poll_mode")
+            .short("f")
+            .help("Poll Telegram Bot API for updates")
+        )
+        .arg(clap::Arg::with_name("poll_int")
+            .short("i").takes_value(true).default_value("4").requires("poll_mode")
+            .help("Update poll interval (seconds)")
+        )
+        .arg(clap::Arg::with_name("mem_int")
+            .short("m").takes_value(true).default_value("60")
+            .help("Memory cache purge interval (seconds)")
+        )
+        .arg(clap::Arg::with_name("disk_int")
+            .short("d").takes_value(true).default_value("300")
+            .help("Disk cache purge interval (seconds)")
+        )
+        .get_matches();
+    
+    use std::str::FromStr;
+
+    std::env::set_var("BOTTOKEN", clmatches.value_of("bot_token").unwrap());
+    let bind_addr = clmatches.value_of("bind_addr")
+        .and_then(|s| std::net::SocketAddr::from_str(s).ok())
+        .unwrap_or(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8778));
+    let poll_mode = clmatches.is_present("poll_mode");
+    let poll_int = clmatches.value_of("poll_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(2);
+    let mem_int = clmatches.value_of("mem_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(60);
+    let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(300);
+
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.handle().clone();
+    let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
 
-    rt.block_on(async move {
-        let new_service = hyper::service::make_service_fn({ let exec = exec.clone(); move |_| {
+    let join_handle = rt.enter(|| {
+        let new_service = hyper::service::make_service_fn({
             let exec = exec.clone();
-            let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
-            future::ok::<_, hyper::Error>(sfn)
-        }});
+            move |_| {
+                let exec = exec.clone();
+                let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
+                future::ok::<_, hyper::Error>(sfn)
+            }
+        });
     
-        let addr = ([127, 0, 0, 1], 8778).into();
-        let server = hyper::Server::bind(&addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
-        let addr_str = addr.to_string();
-        println!("---> http://{}/", addr_str);
-        let purge_mem_cache = tokio::time::interval(std::time::Duration::from_secs(60))
+        let server = hyper::Server::bind(&bind_addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
+        println!("Starting server: http://{}/", bind_addr);
+        let purge_mem_cache = tokio::time::interval(std::time::Duration::from_secs(mem_int))
             .map(|_| cache::purge_mem_cache())
             .fold((), |_, _| future::ready( () ));
     
-        let purge_disk_cache = tokio::time::interval(std::time::Duration::from_secs(60 * 5))
+        let purge_disk_cache = tokio::time::interval(std::time::Duration::from_secs(disk_int))
             .map(|_| cache::purge_disk_cache())
             .fold((), |_, _| future::ready( () ));
     
@@ -467,6 +507,13 @@ fn main() {
         exec.spawn(purge_mem_cache);
         exec.spawn(purge_disk_cache);
     
-        forward_updates(format!("http://{}/bot", addr_str)).await
+        if poll_mode {
+            exec.spawn(forward_updates(format!("http://{}/bot", bind_addr), poll_int));
+        }
+
+        shutdown_rx.map(|_| ())
     });
+
+    rt.block_on(join_handle);
+    shutdown_tx.send( () ).unwrap()
 }
