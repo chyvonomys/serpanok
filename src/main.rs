@@ -358,8 +358,8 @@ fn serpanok_api(
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                 .map(|f| f.into())
                 .unwrap_or_else(chrono::Utc::now);
-            let sendh = params.get("sendh").and_then(|q| q.parse::<u32>().ok()).unwrap_or(20);
-            let targeth = params.get("targeth").and_then(|q| q.parse::<u32>().ok()).unwrap_or(8);
+            let sendh = params.get("sendh").and_then(|q| q.parse::<u8>().ok()).unwrap_or(20);
+            let targeth = params.get("targeth").and_then(|q| q.parse::<u8>().ok()).unwrap_or(8);
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
             let tz = lookup_tz(lat, lon);
@@ -455,7 +455,7 @@ fn main() {
             .help("Poll Telegram Bot API for updates")
         )
         .arg(clap::Arg::with_name("poll_int")
-            .short("i").takes_value(true).default_value("4").requires("poll_mode")
+            .short("i").takes_value(true).default_value("4")
             .help("Update poll interval (seconds)")
         )
         .arg(clap::Arg::with_name("mem_int")

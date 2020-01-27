@@ -2,7 +2,7 @@ use crate::telegram;
 use crate::format;
 use crate::data;
 use super::{TaggedLog, lookup_tz};
-use futures::{future, Future, FutureExt, TryFutureExt, stream, Stream, StreamExt, TryStreamExt};
+use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use chrono::{Datelike, Timelike};
@@ -10,32 +10,6 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     pub static ref SUBS: Arc<Mutex<HashMap<(i64, i32), Sub>>> = Arc::default();
-}
-
-fn iter_cancel<S, I, SE, CE, CFn, CFt>(init: I, mut s: S, mut cf: CFn) -> impl Stream<Item=Result<I, SE>> where
-    I: Clone,
-    CFn: FnMut(Option<I>, I) -> CFt + 'static,
-    CFt: Future<Output=Result<(), CE>> + Unpin,
-    S: Stream<Item=Result<I, SE>> + Unpin,
-{
-    let mut cancel_fut: CFt = cf(None, init.clone());
-    let mut prev = Some(init);
-
-    stream::poll_fn(
-        move |cx| -> futures::task::Poll<Option<Result<I, SE>>> {
-            match cancel_fut.poll_unpin(cx) {
-                futures::task::Poll::Ready(Ok(())) => futures::task::Poll::Ready(None),
-                futures::task::Poll::Pending | futures::task::Poll::Ready(Err(_)) => {
-                    let res = s.poll_next_unpin(cx);
-                    if let futures::task::Poll::Ready(Some(Ok(ref i))) = res {
-                        cancel_fut = cf(prev.clone(), i.clone());
-                        prev = Some(i.clone());
-                    }
-                    res
-                }
-            }
-        }
-    )
 }
 
 pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Output=Result<usize, String>> + Send + Unpin> {
@@ -54,35 +28,49 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
     let fts = match sub.mode {
         Mode::Daily(sendh, targeth) =>
             data::daily_forecast_stream(log.clone(), sub.latitude, sub.longitude, sendh, targeth, tz, sub.params)
-                .left_stream(),
+                .boxed(),
         Mode::Once(target_time) =>
             data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
-                .take(1).right_stream(),
+                .take(1).boxed(),
         Mode::Live(target_time) =>
             data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
-                .take(1000).right_stream(),
+                .take(1000).boxed(),
+        Mode::Debug(n, d) =>
+            tokio::time::interval_at(
+                tokio::time::Instant::now() + tokio::time::Duration::from_secs(d),
+                tokio::time::Duration::from_secs(d)
+            ).map(|_x| Ok(data::Forecast{
+                temperature: 0.0, time: (chrono::Utc::now(), chrono::Utc::now()),
+                rain_accum: None, snow_accum: None, snow_depth: None, total_precip_accum: None, total_cloud_cover: None, wind_speed: None,
+            }))
+                .take(n).boxed()
     };
 
-    let f = iter_cancel(
-        widget_msg_id,
-        fts
-            .map_ok(move |f| format::format_forecast(&sub.name, sub.latitude, sub.longitude, &f, tz))
-            .and_then(move |format::ForecastText(upd)| tg_send_widget(chat_id, TgText::Markdown(upd), None, None)),
-        move |remove_id, add_id| {
-            if let Some(msg_id) = remove_id {
-                future::Either::Left(tg_edit_kb(chat_id, msg_id, None))
-            } else {
-                future::Either::Right(future::ok( () ))
-            }
-            .and_then(move |()|
-                keyboard_input(chat_id, add_id, vec![vec![btn("припинити", CANCEL_DATA)]]).map_ok(|_d| ())
+    let forecasts = fts.map_ok(move |f| format::format_forecast(&sub.name, sub.latitude, sub.longitude, &f, tz));
+
+    let f = loop_fn(Ok(Some( (widget_msg_id, forecasts)) ), move |x| match x {
+        Ok(Some( (cancel_host, forecasts) )) =>
+            futures::future::try_select(
+                forecasts.into_future().then(move |(head, tail)| match head {
+                    Some(Ok(format::ForecastText(upd))) =>
+                        tg_send_widget(chat_id, TgText::Markdown(upd), None, None)
+                            .map_ok(|new_host| Some( (new_host, tail) )).left_future(), // next ok item in stream
+                    Some(Err(e)) => future::err(e).right_future(), // error in stream
+                    None => future::ok(None).right_future(), // end of stream
+                }),
+                keyboard_input(chat_id, cancel_host, vec![vec![btn("припинити", CANCEL_DATA)]]).map_ok(|_d| None),
             )
-        },
-    )
-        .try_fold(0, move |n, _msg_id| future::ok(n+1))
-        .inspect_ok(move |n| log.add_line(&format!("done: {} updates", n)))
-        .map_err(|e| format!("subscription future error: {}", e))
-        .then(move |x| {SUBS.lock().unwrap().remove(&key); future::ready(x)});
+            .map_ok(|p| p.factor_first().0)
+            .map_err(|p| p.factor_first().0)
+            .then(move |x| tg_edit_kb(chat_id, cancel_host, None).map(|_| x)) // compulsory, but make sure we delete that kb
+            .map(Loop::Continue).left_future(),
+        x => future::ready(x)
+            .map(Loop::Break).right_future(),
+    })
+    .map_ok(|_| 0)
+    .inspect_ok(move |n| log.add_line(&format!("done: {} updates", n)))
+    .map_err(|e| format!("subscription future error: {}", e))
+    .inspect(move |_| { SUBS.lock().unwrap().remove(&key); });
 
     Box::new(f)
 }
@@ -107,7 +95,8 @@ use serde_derive::{Serialize, Deserialize};
 enum Mode {
     Once(chrono::DateTime<chrono::Utc>),
     Live(chrono::DateTime<chrono::Utc>),
-    Daily(u32, u32),
+    Daily(u8, u8),
+    Debug(usize, u64),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -276,12 +265,13 @@ impl Future for UserInput {
 }
 
 type Ymd = (i32, u32, u32);
-type PickerCell = Option<(u32, chrono::DateTime<chrono::Utc>)>;
+type PickerCell = Option<(u8, chrono::DateTime<chrono::Utc>)>;
 
 pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ymd, Vec<Vec<PickerCell>>)> {
 
     use itertools::Itertools; // group_by, merge_join_by
-    
+    use std::convert::TryInto;
+
     let start0 = start.date().and_hms(start.hour(), 0, 0);
 
     (1..120)
@@ -290,7 +280,7 @@ pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ym
         .into_iter()
         .map(|(ymd, ts)| {
             let hs = ts
-                .map(|t| (t.hour(), chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc)))
+                .map(|t| (t.hour().try_into().unwrap(), chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc)))
                 .group_by(|p| p.0 / 6)
                 .into_iter()
                 .map(|(_row, xs)| {
@@ -334,6 +324,7 @@ fn format_widget_text(state: &WidgetState, time: Option<&Mode>) -> TgText {
                 "\nщодня о *{:02}:00*\nна *{:02}:00*{}",
                 sendh, targeth, if sendh < targeth { " того ж дня" } else { " наступного дня" }
             ),
+            Some(Mode::Debug(n, d)) => format!("\nDEBUG {} times, {}s", n, d),
             None => String::default(),
         }
     );
@@ -345,6 +336,8 @@ fn mode_screen(chat_id: i64, widget_msg_id: i32) -> impl Future<Output=Result<Op
         vec![btn("поточний прогноз", "once")],
         vec![btn("стежити за прогнозом", "live")],
         vec![btn("прогноз щодня", "daily")],
+        #[cfg(debug_assertions)]
+        vec![btn("DEBUG", "dbg")],
         vec![btn("скасувати", CANCEL_DATA)]
     ];
 
@@ -353,13 +346,14 @@ fn mode_screen(chat_id: i64, widget_msg_id: i32) -> impl Future<Output=Result<Op
             Ok(m) if m == "once" => Ok(Some(Mode::Once(chrono::Utc::now() + chrono::Duration::hours(1)))),
             Ok(m) if m == "live" => Ok(Some(Mode::Live(chrono::Utc::now() + chrono::Duration::hours(1)))),
             Ok(m) if m == "daily" => Ok(Some(Mode::Daily(20, 8))),
+            Ok(m) if m == "dbg" => Ok(Some(Mode::Debug(1, 5))),
             Ok(m) if m == CANCEL_DATA => Ok(None),
             Ok(m) => Err(format!("unexpected mode string `{}`", m)),
             Err(e) => Err(e),
         })
 }
 
-type HourGrid = Vec<Vec<Option<(u32, chrono::DateTime<chrono::Utc>)>>>;
+type HourGrid = Vec<Vec<Option<(u8, chrono::DateTime<chrono::Utc>)>>>;
 
 fn day_screen(
     chat_id: i64, widget_msg_id: i32, tz: &chrono_tz::Tz
@@ -389,10 +383,10 @@ fn day_screen(
 }
 
 fn time_screen<T>(
-    chat_id: i64, widget_msg_id: i32, tss: Vec<Vec<Option<(u32, T)>>>
+    chat_id: i64, widget_msg_id: i32, tss: Vec<Vec<Option<(u8, T)>>>
 ) -> impl Future<Output=Result<Option<T>, String>> {
 
-    let mut hours_map: HashMap<String, (u32, _)> = HashMap::new();
+    let mut hours_map: HashMap<String, (u8, _)> = HashMap::new();
 
     let mut kb: Vec<Vec<_>> = tss.into_iter().map(|r| {
         let row: Vec<telegram::TgInlineKeyboardButtonCB> = r.into_iter().map(|c| {
@@ -446,7 +440,7 @@ fn pick_datetime(
 
 fn pick_timetime(
     chat_id: i64, widget_msg_id: i32,
-) -> impl Future<Output=Result<Option<(u32, u32)>, String>> {
+) -> impl Future<Output=Result<Option<(u8, u8)>, String>> {
 
     time_screen(chat_id, widget_msg_id, make_24h_grid())
         .and_then(move |opt_from| match opt_from {
@@ -457,7 +451,7 @@ fn pick_timetime(
         })
 }
 
-fn make_24h_grid() -> Vec<Vec<Option<(u32, u32)>>> {
+fn make_24h_grid() -> Vec<Vec<Option<(u8, u8)>>> {
     (0..4).map(|row| (0..6).map(|col| row * 6 + col).map(|x| Some((x, x))).collect()).collect()
 }
 
@@ -499,7 +493,14 @@ fn adjust_mode(
                     Some((f, t)) => Adjust::Changed(Mode::Daily(f, t)),
                     None => Adjust::Same(Mode::Daily(f0, t0)),
                 })
-                .right_future(),
+                .left_future().right_future(),
+        Mode::Debug(n0, d0) =>
+            pick_timetime(chat_id, widget_msg_id)
+                .map_ok(move |opt| match opt {
+                    Some((n, d)) => Adjust::Changed(Mode::Debug(n.into(), d.into())),
+                    None => Adjust::Same(Mode::Debug(n0, d0)),
+                })
+                .right_future().right_future(),
     }
 }
 
@@ -683,6 +684,7 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
                     "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
+                    "/debug" => Box::new(process_widget(chat_id, 50.62, 26.25, Some("debug-rv".to_owned()))),
                     _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
                 },
             SeUpdateVariant::Place {latitude, longitude, name, ..} =>

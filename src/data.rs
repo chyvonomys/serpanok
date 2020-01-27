@@ -371,7 +371,7 @@ pub fn forecast_stream(
 }
 
 pub fn daily_iterator(
-    start_time: chrono::DateTime<chrono::Utc>, h0: u32, mut h1: u32, tz: chrono_tz::Tz
+    start_time: chrono::DateTime<chrono::Utc>, h0: u8, mut h1: u8, tz: chrono_tz::Tz
 ) -> impl Iterator<Item=(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
 
     let start_tz = tz.from_utc_datetime(&start_time.naive_utc());
@@ -383,11 +383,11 @@ pub fn daily_iterator(
 
     (0..).map(move |i| {
         let send   = (start_tz_trunc + chrono::Duration::hours(i64::from(24 * i + h0)))
-            .date().and_hms_opt(h0 % 24, 0, 0)
+            .date().and_hms_opt((h0 % 24).into(), 0, 0)
             .map(|t| chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc));
 
         let target = (start_tz_trunc + chrono::Duration::hours(i64::from(24 * i + h1)))
-            .date().and_hms_opt(h1 % 24, 0, 0)
+            .date().and_hms_opt((h1 % 24).into(), 0, 0)
             .map(|t| chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc));
 
         (send, target)
@@ -400,7 +400,7 @@ pub fn daily_iterator(
 }
 
 pub fn daily_forecast_stream(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, sendh: u32, targeth: u32, tz: chrono_tz::Tz, params: ParameterFlags
+    log: Arc<TaggedLog>, lat: f32, lon: f32, sendh: u8, targeth: u8, tz: chrono_tz::Tz, params: ParameterFlags
 ) -> impl Stream<Item=Result<Forecast, String>> {
     stream::iter(daily_iterator(chrono::Utc::now(), sendh, targeth, tz))
         .then(move |(at, target)| {
