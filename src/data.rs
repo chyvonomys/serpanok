@@ -188,7 +188,7 @@ type TimestepSpec = (chrono::DateTime<chrono::Utc>, u8);
 
 use serde_derive::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub struct ParameterFlags {
     pub tcc: bool,
     pub wind: bool,
@@ -196,6 +196,8 @@ pub struct ParameterFlags {
     pub rain: bool,
     pub snow: bool,
     pub depth: bool,
+    pub pmsl: bool,
+    pub relhum: bool,
 }
 
 impl Default for ParameterFlags {
@@ -207,6 +209,8 @@ impl Default for ParameterFlags {
             rain: true,
             snow: true,
             depth: false,
+            pmsl: false,
+            relhum: false,
         }
     }
 }
@@ -224,7 +228,11 @@ fn avail_all(
     let ts1 = t1.1;
     let f = future::try_join4(
         avail_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
-        opt_wrap(params.tcc, move || avail_value(log1, Parameter::TotalCloudCover, lat, lon, mr, ts)),
+        future::try_join3(
+            opt_wrap(params.tcc, { let l = log.clone(); move || avail_value(l, Parameter::TotalCloudCover, lat, lon, mr, ts)}),
+            opt_wrap(params.relhum, { let l = log.clone(); move || avail_value(l, Parameter::RelHumidity2m, lat, lon, mr, ts)}),
+            opt_wrap(params.pmsl, move || avail_value(log1, Parameter::PressureMSL, lat, lon, mr, ts)),
+        ),
         opt_wrap(params.wind, move || future::try_join(
             avail_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
             avail_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
@@ -266,7 +274,11 @@ fn fetch_all(
     let ts1 = t1.1;
     let f = future::try_join4(
         fetch_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
-        opt_wrap(params.tcc, move || fetch_value(log1, Parameter::TotalCloudCover, lat, lon, mr, ts)),
+        future::try_join3(
+            opt_wrap(params.tcc, { let l = log.clone(); move || fetch_value(l, Parameter::TotalCloudCover, lat, lon, mr, ts)}),
+            opt_wrap(params.relhum, { let l = log.clone(); move || fetch_value(l, Parameter::RelHumidity2m, lat, lon, mr, ts)}),
+            opt_wrap(params.pmsl, move || fetch_value(log1, Parameter::PressureMSL, lat, lon, mr, ts)),
+        ),
         opt_wrap(params.wind, move || future::try_join(
             fetch_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
             fetch_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
@@ -291,9 +303,11 @@ fn fetch_all(
             opt_wrap(params.depth, move || fetch_value(log, Parameter::SnowDepth, lat, lon, mr, ts)),
         ),
     )
-    .map_ok(move |(t, otcc, owind, (oprecip, orain, osnow, odepth))| Forecast {
+    .map_ok(move |(t, (otcc, orhum, opmsl), owind, (oprecip, orain, osnow, odepth))| Forecast {
         temperature: t,
         total_cloud_cover: otcc,
+        rel_humidity: orhum,
+        pressure_msl: opmsl,
         wind_speed: owind,
         total_precip_accum: oprecip,
         rain_accum: orain.map(|(ls0, ls1, c0, c1)| (ls0 + c0, ls1 + c1)),
@@ -342,6 +356,8 @@ pub struct Forecast {
     pub temperature: f32,
     pub time: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
     pub total_cloud_cover: Option<f32>,
+    pub rel_humidity: Option<f32>,
+    pub pressure_msl: Option<f32>,
     pub wind_speed: Option<(f32, f32)>,
     pub total_precip_accum: Option<(f32, f32)>,
     pub rain_accum: Option<(f32, f32)>,

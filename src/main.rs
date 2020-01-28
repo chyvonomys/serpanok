@@ -16,6 +16,8 @@ pub enum Parameter {
     ConvectiveRain,
     LargeScaleRain,
     SnowDepth,
+    PressureMSL,
+    RelHumidity2m,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

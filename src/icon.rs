@@ -16,6 +16,8 @@ pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
         (Parameter::ConvectiveRain, 1, 76) => true, // Moisture/ConvectiveRainRate(kg/m2/s)
         (Parameter::LargeScaleRain, 1, 77) => true, // Moisture/LargeScaleRainRate(kg/m2/s)
         (Parameter::SnowDepth, 1, 11) => true, // Moisture/SnowDepth(m)
+        (Parameter::PressureMSL, 3, 1) => true, // Mass/PressureReducedToMSL(Pa)
+        (Parameter::RelHumidity2m, 1, 1) => true, // Moisture/RelativeHumidity(%)
         _ => false
     }
 }
@@ -62,6 +64,8 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
                 "SNOW_GSP" => Some(Parameter::LargeScaleSnow),
                 "RAIN_GSP" => Some(Parameter::LargeScaleRain),
                 "H_SNOW"   => Some(Parameter::SnowDepth),
+                "PMSL"     => Some(Parameter::PressureMSL),
+                "RELHUM_2M"=> Some(Parameter::RelHumidity2m),
                 _ => None
             }.map(move |param| FileKey {yyyy, mm, dd, modelrun, timestep, param})
         } else {
@@ -90,6 +94,8 @@ impl IconFile {
             Parameter::LargeScaleSnow => "SNOW_GSP",
             Parameter::LargeScaleRain => "RAIN_GSP",
             Parameter::SnowDepth => "H_SNOW",
+            Parameter::PressureMSL => "PMSL",
+            Parameter::RelHumidity2m => "RELHUM_2M",
         };
 
         let yyyymmdd = format!("{}{:02}{:02}", key.yyyy, key.mm, key.dd);

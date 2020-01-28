@@ -41,7 +41,8 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
                 tokio::time::Duration::from_secs(d)
             ).map(|_x| Ok(data::Forecast{
                 temperature: 0.0, time: (chrono::Utc::now(), chrono::Utc::now()),
-                rain_accum: None, snow_accum: None, snow_depth: None, total_precip_accum: None, total_cloud_cover: None, wind_speed: None,
+                rain_accum: None, snow_accum: None, snow_depth: None, total_precip_accum: None, total_cloud_cover: None,
+                wind_speed: None, rel_humidity: None, pressure_msl: None
             }))
                 .take(n).boxed()
     };
@@ -523,16 +524,43 @@ fn adjust_name(chat_id: i64, widget_msg_id: i32, name: Option<String>) -> impl F
 fn adjust_params(
     chat_id: i64, widget_msg_id: i32, params: data::ParameterFlags
 ) -> impl Future<Output=Result<Adjust<data::ParameterFlags>, String>> {
+    
+    loop_fn(Ok(params), move |res| match res {
+        Ok(ps) => adjust_params_screen(chat_id, widget_msg_id, ps)
+            .then(|x| future::ready(match x {
+                Ok( (true, flags) ) => Loop::Break(Ok(flags)),
+                Ok( (false, flags) ) => Loop::Continue(Ok(flags)),
+                Err(e) => Loop::Break(Err(e)),
+            })).left_future(),
+        Err(e) => future::ready(Loop::Break(Err(e))).right_future(),
+    })
+    .map_ok(move |flags| if flags == params { Adjust::Same(flags) } else { Adjust::Changed(flags) })
+}
+
+fn adjust_params_screen(
+    chat_id: i64, widget_msg_id: i32, params: data::ParameterFlags
+) -> impl Future<Output=Result<(bool, data::ParameterFlags), String>> {
 
     let kb = vec![
-        vec![opt_btn("t повітря", true, PADDING_DATA), opt_btn("шар снігу", params.depth, PADDING_DATA)],
-        vec![opt_btn("дощ", params.rain, PADDING_DATA), opt_btn("сніг", params.snow, PADDING_DATA)],
-        vec![opt_btn("хмарність", params.tcc, PADDING_DATA), opt_btn("вітер", params.wind, PADDING_DATA)],
-        vec![btn("OK", "ok")],
+        vec![opt_btn("t повітря", true, PADDING_DATA), opt_btn("шар снігу", params.depth, "depth")],
+        vec![opt_btn("дощ", params.rain, "rain"), opt_btn("сніг", params.snow, "snow")],
+        vec![opt_btn("хмарність", params.tcc, "tcc"), opt_btn("вітер", params.wind, "wind")],
+        vec![opt_btn("атм. тиск", params.pmsl, "pmsl"), opt_btn("відн. вологість", params.relhum, "relhum")],
+        vec![btn("ок", "ok")],
     ];
 
     keyboard_input(chat_id, widget_msg_id, kb)
-        .and_then(move |_d| future::ok(Adjust::Same(params))) // TODO:
+        .and_then(move |d| future::ready(match d.as_str() {
+            "ok" => Ok((true, params)),
+            "depth" =>  Ok((false, data::ParameterFlags{ depth: !params.depth,   ..params})),
+            "rain" =>   Ok((false, data::ParameterFlags{ rain: !params.rain,     ..params})),
+            "snow" =>   Ok((false, data::ParameterFlags{ snow: !params.snow,     ..params})),
+            "tcc" =>    Ok((false, data::ParameterFlags{ tcc: !params.tcc,       ..params})),
+            "wind" =>   Ok((false, data::ParameterFlags{ wind: !params.wind,     ..params})),
+            "pmsl" =>   Ok((false, data::ParameterFlags{ pmsl: !params.pmsl,     ..params})),
+            "relhum" => Ok((false, data::ParameterFlags{ relhum: !params.relhum, ..params})),
+            x => Err(format!("unexpected param click `{}`", x)),
+        }))
 }
 
 enum Loop<T> {

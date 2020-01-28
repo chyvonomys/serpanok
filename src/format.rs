@@ -108,5 +108,11 @@ pub fn format_forecast(name: &Option<String>, lat: f32, lon: f32, f: &data::Fore
         let wind_speed = (wind.0 * wind.0 + wind.1 * wind.1).sqrt();
         result.push_str(&format!("вітер: *{} {:.1}м/с*\n", format_wind_dir(wind.0, wind.1), (10.0 * wind_speed).round() / 10.0));
     }
+    if let Some(relhum) = f.rel_humidity {
+        result.push_str(&format!("відн. вологість: *{:.0}%*\n", relhum));
+    }
+    if let Some(pmsl) = f.pressure_msl {
+        result.push_str(&format!("атм. тиск: *{:.0}ммHg*\n", pmsl / 133.322))
+    }
     ForecastText(result)
 }
