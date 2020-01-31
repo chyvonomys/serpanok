@@ -27,7 +27,7 @@ pub struct FileKey {
     mm: u8,
     dd: u8,
     modelrun: u8,
-    timestep: u8,
+    timestep: u16,
 }
 
 impl FileKey {
@@ -43,7 +43,7 @@ impl FileKey {
         }
     }
 
-    fn new(param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u8) -> Self {
+    fn new(param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u16) -> Self {
         Self {
             param,
             yyyy: dt.year() as u16,
@@ -64,6 +64,7 @@ mod telegram;
 mod ui;
 mod cache;
 mod icon;
+mod gfs;
 mod data;
 mod format;
 
@@ -101,7 +102,9 @@ fn fold_response_body(resp: hyper::Response<hyper::Body>) -> impl Future<Output=
     resp.into_body().try_fold(
         Vec::new(),
         |mut acc, x| { acc.extend_from_slice(&x); future::ok::<_, hyper::Error>(acc) }
-    ).map_ok(move |v| (status == hyper::StatusCode::OK, v)).map_err(|e| format!("fold body error: {}", e.to_string()))
+    )
+    .map_ok(move |v| (status == hyper::StatusCode::OK || status == hyper::StatusCode::PARTIAL_CONTENT, v))
+    .map_err(|e| format!("fold body error: {}", e.to_string()))
 }
 
 fn http_post_json(url: String, json: String) -> impl Future<Output=Result<(bool, Vec<u8>), String>> {
@@ -116,8 +119,9 @@ fn http_post_json(url: String, json: String) -> impl Future<Output=Result<(bool,
         .and_then(fold_response_body)
 }
 
-fn http_get(url: String) -> impl Future<Output=Result<(bool, Vec<u8>), String>> {
-    let req = hyper::Request::get(&url)
+fn http_get(url: String, hs: &[(&str, &str)]) -> impl Future<Output=Result<(bool, Vec<u8>), String>> {
+    let req = hs.iter()
+        .fold(hyper::Request::get(&url), |builder, y| builder.header(y.0, y.1))
         .body(hyper::Body::from(""))
         .unwrap_or_else(|_| panic!("GET request build failed for {}", &url));
 
@@ -138,9 +142,9 @@ fn http_head(url: String) -> impl Future<Output=Result<bool, String>> {
         .map_ok(|resp| resp.status() == hyper::StatusCode::OK)
 }
 
-fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=Result<Vec<u8>, String>> {
+fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String, hs: &[(&str, &str)]) -> impl Future<Output=Result<Vec<u8>, String>> {
     log.add_line(&format!("GET {}", url));
-    http_get(url).and_then(|(ok, body)|
+    http_get(url, hs).and_then(|(ok, body)|
         if ok {
             future::Either::Left(future::ok(body))
         } else {

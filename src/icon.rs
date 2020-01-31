@@ -23,14 +23,14 @@ pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
 }
 
 
-pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u8> {
+pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u16> {
     if mr % 6 == 0 {
         either::Either::Left(Iterator::chain(
-            0u8..78,
+            0u16..78,
             (78..=120).step_by(3)
         ))
     } else {
-        either::Either::Right(0u8..=30)
+        either::Either::Right(0u16..=30)
     }
 }
 
@@ -50,7 +50,7 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
         let omm = cs.get(2).and_then(|x| x.as_str().parse::<u8>().ok());
         let odd = cs.get(3).and_then(|x| x.as_str().parse::<u8>().ok());
         let omr = cs.get(4).and_then(|x| x.as_str().parse::<u8>().ok());
-        let ots = cs.get(5).and_then(|x| x.as_str().parse::<u8>().ok());
+        let ots = cs.get(5).and_then(|x| x.as_str().parse::<u16>().ok());
         let op = cs.get(6).map(|x| x.as_str());
         if let (Some(yyyy), Some(mm), Some(dd), Some(modelrun), Some(timestep), Some(p)) = (oyyyy, omm, odd, omr, ots, op) {
             match p {
@@ -114,7 +114,7 @@ impl IconFile {
     // ICON specific: download and unpack
 
     pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<Vec<u8>, String>> {
-        fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename))
+        fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename), &[])
             .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
     }
 

@@ -259,7 +259,7 @@ pub fn get_updates(last: Option<i32>) -> impl Future<Output=Result<Vec<(Option<i
         url.push_str(&(x+1).to_string());
     }
 
-    http_get(url).and_then(|(ok, body)| future::ready(
+    http_get(url, &[]).and_then(|(ok, body)| future::ready(
         if ok {
             serde_json::from_slice::<TgResponse< Vec<serde_json::Value>> >(&body)
                 .map_err(|e| format!("parse updates error: {}", e.to_string()))

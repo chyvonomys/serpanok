@@ -7,22 +7,12 @@ use chrono::{Timelike, TimeZone};
 use futures::{stream, Stream, StreamExt, TryStreamExt, future, Future, FutureExt, TryFutureExt};
 use itertools::Itertools; // tuple_windows, collect_vec
 
-pub trait Timeseries {
-    fn to_u8(&self) -> u8;
-}
-
-impl Timeseries for u8 {
-    fn to_u8(&self) -> u8 {
-        *self
-    }
-}
-
 pub fn forecast_iterator<MR, TS, TSI, MRI, MRIF, TSIF>(
     start_time: chrono::DateTime<chrono::Utc>, target_time: chrono::DateTime<chrono::Utc>, mri: MRIF, tsi: TSIF
 ) -> impl Iterator<Item=(chrono::DateTime<chrono::Utc>, MR, chrono::DateTime<chrono::Utc>, TS, chrono::DateTime<chrono::Utc>, TS)>
 where
-    MR: Timeseries + Clone,
-    TS: Timeseries + Clone,
+    MR: Into<i64> + Clone,
+    TS: Into<i64> + Clone,
     TSI: Iterator<Item=TS>,
     MRI: Iterator<Item=MR>,
     MRIF: Fn() -> MRI,
@@ -33,7 +23,7 @@ where
 
     (0..)
         .flat_map(move |day| mri().map(
-            move |hh| (start_time_d + chrono::Duration::hours(day * 24 + i64::from(hh.to_u8())), hh)
+            move |hh| (start_time_d + chrono::Duration::hours(day * 24 + hh.clone().into()), hh)
         ))
         .tuple_windows::<(_, _)>()
         .skip_while(move |(_, t)| t.0 <= start_time_h)
@@ -41,7 +31,7 @@ where
         .take_while(move |(hhtime, _)| target_time >= *hhtime)
         .map(move |(hhtime, hh)| {
             let opt = tsi(hh.clone())
-             .map(|ts| (hhtime + chrono::Duration::hours(i64::from(ts.to_u8())), ts))
+             .map(|ts| (hhtime + chrono::Duration::hours(ts.clone().into()), ts))
              .tuple_windows::<(_, _)>()
              .take_while(|(f, _)| target_time >= f.0)
              .skip_while(|(_, t)| target_time >= t.0)
@@ -146,7 +136,7 @@ fn avail_value(
     param: Parameter,
     _lat: f32, _lon: f32,
     modelrun: ModelrunSpec,
-    timestep: u8,
+    timestep: u16,
 ) -> impl Future<Output=Result<(), String>> {
     let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
     cache::avail_grid(log, file_key)
@@ -158,7 +148,7 @@ fn fetch_value(
     param: Parameter,
     lat: f32, lon: f32,
     modelrun: ModelrunSpec,
-    timestep: u8,
+    timestep: u16,
 ) -> impl Future<Output=Result<f32, String>> {
 
     let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
@@ -184,7 +174,7 @@ where FN: FnOnce() -> F, F: Future<Output=Result<I, String>> {
 }
 
 type ModelrunSpec = (chrono::Date<chrono::Utc>, u8);
-type TimestepSpec = (chrono::DateTime<chrono::Utc>, u8);
+type TimestepSpec = (chrono::DateTime<chrono::Utc>, u16);
 
 use serde_derive::{Serialize, Deserialize};
 
@@ -322,7 +312,7 @@ fn select_start_time<F, R>(
     log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F
 ) -> impl Future<Output=Result<chrono::DateTime<chrono::Utc>, String>>
 where
-    F: Fn(Arc<TaggedLog>, (chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8, chrono::DateTime<chrono::Utc>, u8)) -> R,
+    F: Fn(Arc<TaggedLog>, chrono::DateTime<chrono::Utc>, u8, TimestepSpec, TimestepSpec) -> R,
     R: Future<Output=Result<(), String>> + Unpin,
 {
     let now = chrono::Utc::now();
@@ -338,7 +328,7 @@ where
         .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
             log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
             let log = log.clone();
-            try_func(log.clone(), (mrt, mr, ft, ts, ft1, ts1))
+            try_func(log.clone(), mrt, mr, (ft, ts), (ft1, ts1))
                 .then(move |v: Result<(), String>| {
                     let res = match v {
                         Ok( () ) => Some(mrt),
@@ -371,7 +361,7 @@ pub fn forecast_stream(
 
     select_start_time(
         log.clone(), target_time,
-        move |log, (mrt, mr, ft, ts, ft1, ts1)| avail_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
+        move |log, mrt, mr, (ft, ts), (ft1, ts1)| avail_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
     )
     .map_ok(move |f| {
         stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
