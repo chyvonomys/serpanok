@@ -1,4 +1,4 @@
-use super::{Parameter, FileKey, TaggedLog};
+use super::{Parameter, FileKey, DataFile, DataSource, TaggedLog};
 use super::{fetch_url, avail_url, unpack_bzip2};
 use crate::grib;
 use futures::{Future, TryFutureExt};
@@ -67,7 +67,7 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
                 "PMSL"     => Some(Parameter::PressureMSL),
                 "RELHUM_2M"=> Some(Parameter::RelHumidity2m),
                 _ => None
-            }.map(move |param| FileKey {yyyy, mm, dd, modelrun, timestep, param})
+            }.map(move |param| FileKey{ source: DataSource::IconEu, yyyy, mm, dd, modelrun, timestep, param })
         } else {
             None
         }
@@ -81,7 +81,7 @@ pub struct IconFile {
 }
 
 impl IconFile {
-    pub fn new(key: FileKey) -> Self {
+    pub fn new(key: &FileKey) -> Self {
 
         let paramstr = match key.param {
             Parameter::Temperature2m => "T_2M",
@@ -107,26 +107,29 @@ impl IconFile {
         }
     }
 
-    pub fn cache_filename(&self) -> &str {
-        &self.filename
-    }
-
-    // ICON specific: download and unpack
-
-    pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<Vec<u8>, String>> {
-        fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename), &[])
-            .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
-    }
 
     pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
         avail_url(log, format!("{}{}.bz2", self.prefix, self.filename))
     }
 
-    pub fn available_from(&self) -> chrono::DateTime<chrono::Utc> {
+}
+
+impl DataFile for IconFile {
+    fn cache_filename(&self) -> &str {
+        &self.filename
+    }
+
+    fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<Vec<u8>, String>> + Send + Unpin> {
+        Box::new(fetch_url(log, format!("{}{}.bz2", self.prefix, self.filename), &[])
+            .and_then(|bzip2: Vec<u8>| unpack_bzip2(&bzip2))
+        )
+    }
+
+    fn available_from(&self) -> chrono::DateTime<chrono::Utc> {
         self.modelrun_time + chrono::Duration::hours(2) + chrono::Duration::minutes(30)
     }
 
-    pub fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
+    fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
         self.modelrun_time + chrono::Duration::hours(26) + chrono::Duration::minutes(30)
     }
 }

@@ -33,7 +33,7 @@ named!(parse_ymdhms<Ymdhms>, do_parse!(
 named!(parse_section1<Section1>, do_parse!(
     _length: verify!(be_u32, |n| n == 21) >>
     _section_id: tag!(&[1]) >>
-    _centre: alt!(tag!(&[0, 54]) | tag!(&[0, 78])) >>
+    _centre: alt!(tag!(&[0, 54]) | tag!(&[0, 78]) | tag!(&[0, 7])) >>
     _sub_centre: call!(be_u16) >>
     tables_version: call!(be_u8) >>
     _local_tables_version: call!(be_u8) >>
@@ -98,7 +98,7 @@ named!(parse_section3<Section3>, do_parse!(
     _n_points_interp: tag!(&[0]) >>
     _grid_def_template: tag!(&[0, 0]) >>
     _earth_shape: tag!(&[6]) >>
-    _scales: tag!(&[0xFF; 15]) >>
+    _scales: alt!(tag!(&[0xFF; 15]) | tag!(&[0; 15])) >> // GFS has zeros
     ni: call!(be_u32) >>
     nj: call!(be_u32) >>
     _basic_angle: tag!(&[0; 4]) >>
@@ -110,7 +110,7 @@ named!(parse_section3<Section3>, do_parse!(
     lon_last: call!(parse_i32) >>
     di: call!(be_u32) >>
     dj: call!(be_u32) >>
-    _scan_mode: tag!(&[0b0100_0000]) >>
+    _scan_mode: alt!(tag!(&[0b0100_0000]) | tag!(&[0b0000_0000])) >> // GFS has all zeros, TODO:
   
     (Section3 {
         n_data_points, ni, nj, di, dj,
@@ -206,8 +206,8 @@ named!(parse_common_productdef<CommonProductDef>, do_parse!(
     _level1_factor: tag!(&[0]) >>
     level1_value: call!(be_u32) >>
     _level2_type: tag!(&[0xFF]) >>
-    _level2_factor: tag!(&[0xFF]) >>
-    _level2_value: tag!(&[0xFF; 4]) >>
+    _level2_factor: alt!(tag!(&[0xFF]) | tag!(&[0])) >> // GFS has zero here
+    _level2_value: alt!(tag!(&[0xFF; 4]) | tag!(&[0; 4])) >> // GFS has zeroes here
     
     (CommonProductDef {
         parameter_cat, parameter_num,
@@ -220,6 +220,7 @@ named!(parse_common_productdef<CommonProductDef>, do_parse!(
 pub enum Packing {
     Simple {r: f32, e: i16, d: i16, bits: u8},
     Jpeg2000 {r: f32, e: i16, d: i16, bits: u8},
+    ComplexSpatialDiff {r: f32, e: i16, d: i16, bits: u8},
 }
 
 named!(parse_simple_packing<Packing>, do_parse!(
@@ -231,6 +232,31 @@ named!(parse_simple_packing<Packing>, do_parse!(
     _field_type: tag!(&[0]) >>
 
     (Packing::Simple{r, e, d, bits})
+));
+
+named!(parse_complex_packing_spatial_diff<Packing>, do_parse!(
+    _template_id: tag!(&[0, 3]) >>
+    r: call!(be_f32) >>
+    e: call!(parse_i16) >>
+    d: call!(parse_i16) >>
+    bits: call!(be_u8) >>
+    _field_type: tag!(&[0]) >>
+    // TODO:
+    _group_splitting: tag!(&[1]) >>
+    _missing_value_mgmt: tag!(&[0]) >>
+    _primary_missing_value_sub: call!(be_u32) >>
+    _secondary_missing_value_sub: call!(be_u32) >>
+    _n_groups: call!(be_u32) >>
+    _ref_group_widths: tag!(&[0]) >>
+    _group_width_bits: tag!(&[4]) >>
+    _ref_group_lengths: tag!(&[0, 0, 0, 1]) >>
+    _length_incr: tag!(&[1]) >>
+    _last_group_length: tag!(&[0, 0, 0, 104]) >>
+    _scaled_group_length_bits: tag!(&[8]) >>
+    _spatial_diff_order: tag!(&[2]) >>
+    _extra_descriptor_octets: tag!(&[2]) >>
+
+    (Packing::ComplexSpatialDiff{r, e, d, bits})
 ));
 
 named!(parse_jpeg2000_packing<Packing>, do_parse!(
@@ -255,7 +281,7 @@ pub struct Section5 {
 named!(parse_section5<Section5>, do_parse!(
     _section_id: tag!(&[5]) >>
     n_values: call!(be_u32) >>
-    packing: alt!(call!(parse_simple_packing) | call!(parse_jpeg2000_packing)) >>
+    packing: alt!(call!(parse_simple_packing) | call!(parse_jpeg2000_packing) | call!(parse_complex_packing_spatial_diff)) >>
 
     (Section5 { n_values, packing })
 ));

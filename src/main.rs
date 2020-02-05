@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::sync::Arc;
 use chrono::{Datelike, Timelike, TimeZone};
 use serde_derive::Serialize;
 use lazy_static::*;
@@ -21,7 +22,16 @@ pub enum Parameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+enum DataSource {
+    IconEu,
+    Gfs025,
+    Gfs050,
+    Gfs100,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct FileKey {
+    source: DataSource,
     param: Parameter,
     yyyy: u16,
     mm: u8,
@@ -34,6 +44,7 @@ impl FileKey {
     #[cfg(test)]
     fn test_new() -> Self {
         Self {
+            source: DataSource::IconEu,
             param: Parameter::Temperature2m,
             yyyy: 2018,
             mm: 11,
@@ -43,9 +54,9 @@ impl FileKey {
         }
     }
 
-    fn new(param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u16) -> Self {
+    fn new(source: DataSource, param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u16) -> Self {
         Self {
-            param,
+            source, param,
             yyyy: dt.year() as u16,
             mm: dt.month() as u8,
             dd: dt.day() as u8,
@@ -57,6 +68,22 @@ impl FileKey {
     fn get_modelrun_tm(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc.ymd(self.yyyy.into(), self.mm.into(), self.dd.into()).and_hms(self.modelrun.into(), 0, 0)
     }
+
+    fn build_data_file(&self) -> Box<dyn DataFile> {
+        match self.source { // TODO: filekey contains datasource
+            DataSource::IconEu => Box::new(icon::IconFile::new(&self)),
+            DataSource::Gfs025 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg025)),
+            DataSource::Gfs050 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg050)),
+            DataSource::Gfs100 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg100)),
+        }
+    }
+}
+
+trait DataFile: Send + Sync {
+    fn cache_filename(&self) -> &str;
+    fn fetch_bytes(&self, log: Arc<TaggedLog>) -> Box<dyn Future<Output=Result<Vec<u8>, String>> + Send + Unpin>;
+    fn available_from(&self) -> chrono::DateTime<chrono::Utc>;
+    fn available_to(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
 mod grib;
@@ -142,7 +169,7 @@ fn http_head(url: String) -> impl Future<Output=Result<bool, String>> {
         .map_ok(|resp| resp.status() == hyper::StatusCode::OK)
 }
 
-fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String, hs: &[(&str, &str)]) -> impl Future<Output=Result<Vec<u8>, String>> {
+fn fetch_url(log: Arc<TaggedLog>, url: String, hs: &[(&str, &str)]) -> impl Future<Output=Result<Vec<u8>, String>> {
     log.add_line(&format!("GET {}", url));
     http_get(url, hs).and_then(|(ok, body)|
         if ok {
@@ -153,7 +180,7 @@ fn fetch_url(log: std::sync::Arc<TaggedLog>, url: String, hs: &[(&str, &str)]) -
     )
 }
 
-fn avail_url(log: std::sync::Arc<TaggedLog>, url: String) -> impl Future<Output=Result<(), String>> {
+fn avail_url(log: Arc<TaggedLog>, url: String) -> impl Future<Output=Result<(), String>> {
     log.add_line(&format!("HEAD {}", url));
     http_head(url).and_then(|ok|
         if ok {
@@ -400,7 +427,7 @@ fn serpanok_api(
             let lat = params.get("lat").and_then(|q| q.parse::<f32>().ok()).unwrap_or(50.62f32);
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
             let tz = lookup_tz(lat, lon);
-            let log = std::sync::Arc::new(TaggedLog {tag: "=query=".to_owned()});
+            let log = Arc::new(TaggedLog {tag: "=query=".to_owned()});
             let f = data::forecast_stream(log, lat, lon, target, data::ParameterFlags::default()).into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))

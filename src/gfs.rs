@@ -1,7 +1,6 @@
 use nom::{named, do_parse, call, tag, recognize, take_until, map_res, many0, complete, digit};
-use super::{FileKey, TaggedLog, Parameter, fetch_url, avail_url};
+use super::{FileKey, DataFile, DataSource, TaggedLog, Parameter, fetch_url, avail_url};
 use futures::{Future, FutureExt, TryFutureExt};
-use crate::grib;
 
 #[test]
 fn test_parse_inventory() {
@@ -20,16 +19,10 @@ fn test_parse_inventory() {
 
 #[test]
 fn test_gfs_fetch() {
-    let key = FileKey::new(Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 1);
-    let gfs = Gfs0p25::new(key);
-    let log = std::sync::Arc::new(TaggedLog{tag: "test".to_owned()});
-    let f = gfs.fetch_bytes(log)
-        .inspect_ok(|x| println!("downloaded {} bytes", x.len()))
-        .map(|res| res.and_then(|x|
-            grib::parse_message(&x)
-                .map(|(rem, msg)| {println!("remaining: {}", rem.len()); msg})
-                .map_err(|_e| format!("grib parse error"))
-        ))
+    use crate::cache;
+    let key = FileKey::new(DataSource::Gfs100, Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 3);
+    let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
+    let f = cache::make_fetch_grid_fut(log, key)
         .map_ok(|_x| println!("got grib message"))
         .map_err(|e| println!("error {}", e))
         .map(|_res| ());
@@ -79,40 +72,113 @@ fn parse_inventory(index: &str) -> Result<Vec<InventoryItem>, String> {
         .map_err(|e| e.to_string())
 }
 
-pub struct Gfs0p25 {
-    url: String,
-    abbrev: String,
-    level: String,
+pub enum GfsResolution {
+    Deg025, Deg050, Deg100
 }
 
-impl Gfs0p25 {
-    pub fn new(key: FileKey) -> Self {
+impl GfsResolution {
+    fn abbrev(&self) -> &'static str {
+        match self {
+            GfsResolution::Deg025 => "0p25",
+            GfsResolution::Deg050 => "0p50",
+            GfsResolution::Deg100 => "1p00",
+        }
+    }
+}
+
+pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
+    lazy_static::lazy_static! {
+        static ref RE: regex::Regex = regex::Regex::new(
+            r"^gfs.(0p25|0p50|1p00).(\d{4})-(\d{2})-(\d{2}).(\d{2}).([0-9_A-Z]+).(\d{3}).grib2$"
+        ).unwrap();
+    }
+
+    RE.captures(filename).and_then(|cs| {
+        let ores = cs.get(1).map(|x| x.as_str());
+        let oyyyy = cs.get(2).and_then(|x| x.as_str().parse::<u16>().ok());
+        let omm = cs.get(3).and_then(|x| x.as_str().parse::<u8>().ok());
+        let odd = cs.get(4).and_then(|x| x.as_str().parse::<u8>().ok());
+        let omr = cs.get(5).and_then(|x| x.as_str().parse::<u8>().ok());
+        let op = cs.get(6).map(|x| x.as_str());
+        let ots = cs.get(7).and_then(|x| x.as_str().parse::<u16>().ok());
+        if let (Some(res), Some(yyyy), Some(mm), Some(dd), Some(modelrun), Some(p), Some(timestep)) = (ores, oyyyy, omm, odd, omr, op, ots) {
+            match p {
+                "TMP"     => Some(Parameter::Temperature2m),
+                _ => None
+            }
+            .and_then(|param|
+                match res {
+                    "0p25" => Some(DataSource::Gfs025),
+                    "0p50" => Some(DataSource::Gfs050),
+                    "1p00" => Some(DataSource::Gfs100),
+                    _ => None
+                }.map(|ds| (ds, param))
+            )
+            .map(move |(source, param)| FileKey{ source, yyyy, mm, dd, modelrun, timestep, param })
+        } else {
+            None
+        }
+    })
+}
+
+pub struct GfsFile {
+    url: String,
+    filename: String,
+    abbrev: String,
+    level: String,
+    res: GfsResolution,
+}
+
+impl GfsFile {
+    pub fn new(key: &FileKey, res: GfsResolution) -> Self {
         Self {
             url: format!(
-                "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.{:04}{:02}{:02}/{:02}/gfs.t{:02}z.pgrb2.0p25.f{:03}",
-                key.yyyy, key.mm, key.dd, key.modelrun, key.modelrun, key.timestep,
+                "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.{:04}{:02}{:02}/{:02}/gfs.t{:02}z.pgrb2.{}.f{:03}",
+                key.yyyy, key.mm, key.dd, key.modelrun, key.modelrun,
+                res.abbrev(), key.timestep,
+            ),
+            filename: format!(
+                "gfs.{}.{:04}-{:02}-{:02}.{:02}.{}.{:03}.grib2",
+                res.abbrev(), key.yyyy, key.mm, key.dd, key.modelrun, "TMP", key.timestep
             ),
             abbrev: "TMP".to_owned(),
             level: "2 m above ground".to_owned(),
+            res,
         }
     }
 
-    pub fn timestep_iter(_mr: u8) -> impl Iterator<Item=u16> {
-        Iterator::chain(
-            0u16..120,
-            (120..=384).step_by(3)
-        )
+    pub fn timestep_iter(&self, _mr: u8) -> impl Iterator<Item=u16> {
+        match self.res {
+            GfsResolution::Deg025 => Iterator::chain(
+                0u16..120,
+                (120..=384).step_by(3)
+            ),
+            _ => Iterator::chain(
+                0u16..0,
+                (0..=384).step_by(3)
+            ),
+        }
     }
     
-    pub fn modelrun_iter() -> impl Iterator<Item=u8> {
+    pub fn modelrun_iter(&self) -> impl Iterator<Item=u8> {
         (0u8..=18).step_by(6)
     }
 
-    pub fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<Vec<u8>, String>> {
+    pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
+        avail_url(log, format!("{}.idx", self.url))
+    }
+}
+
+impl DataFile for GfsFile {
+    fn cache_filename(&self) -> &str {
+        &self.filename
+    }
+
+    fn fetch_bytes(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<Vec<u8>, String>> + Send + Unpin> {
         let abbrev = self.abbrev.clone();
         let level = self.level.clone();
         let url = self.url.clone();
-        fetch_url(log.clone(), format!("{}.idx", self.url), &[])
+        let f = fetch_url(log.clone(), format!("{}.idx", self.url), &[])
             .map(move |res| res
                 .and_then(|vec| String::from_utf8(vec)
                     .map_err(|_| ".idx is not valid utf8".to_owned())
@@ -131,22 +197,17 @@ impl Gfs0p25 {
                 })
             )
             .and_then({ let log = log.clone(); move |(from, to)| {
-                println!("fetch bytes {}-{} ({})", from, to, to-from);
+                log.add_line(&format!("fetch bytes {}-{} ({})", from, to, to-from));
                 fetch_url(log, url, &[("Range", &format!("bytes={}-{}", from, to))])
-            }})
+            }});
+        Box::new(f)
     }
 
-    pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
-        avail_url(log, format!("{}.idx", self.url))
+    fn available_from(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() // TODO:
     }
-}
 
-pub struct Gfs0p50 {
-    // https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.20200128/12/gfs.t12z.pgrb2.0p50.f000 (+.idx)
-    // 0, 3, 6, .., 381, 384 (+3)
-}
-
-pub struct Gfs1p00 {
-    // https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.20200128/12/gfs.t12z.pgrb2.1p00.f000 (+.idx)
-    // 0, 3, 6, .., 381, 384 (+3)
+    fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() + chrono::Duration::hours(1) // TODO:
+    }
 }

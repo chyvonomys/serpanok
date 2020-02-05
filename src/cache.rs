@@ -1,5 +1,6 @@
-use super::{FileKey, TaggedLog, DebugRFC3339};
+use super::{FileKey, TaggedLog, DebugRFC3339, DataFile};
 use crate::icon;
+use crate::gfs;
 use crate::grib;
 use std::sync::Arc;
 use lazy_static::*;
@@ -22,7 +23,8 @@ fn pickup_disk_cache() -> DiskCache<FileKey> {
         .map(|e| e.file_name())
         .for_each(|f| {
             let fname = f.to_str().unwrap();
-            let ofk = icon::filename_to_filekey(fname);
+            let ofk = icon::filename_to_filekey(fname)
+                .or_else(|| gfs::filename_to_filekey(fname));
             println!("entry: {:?} -> {:?}", f, ofk);
             if let Some(fk) = ofk {
                 hm.insert(fk, CacheEntry(fname.to_owned()));
@@ -152,18 +154,21 @@ fn parse_grib2(bytes: &[u8]) -> impl Future<Output=Result<(grib::GribMessage, us
         .map(move |m| (m.1, m.0.len()))
         .map_err(|e| match e {
             nom::Err::Error(nom::Context::Code(i, ek)) =>
-                format!("grib parse failed: {:?} {:?}", &i[..std::cmp::min(i.len(), 10)], ek),
+                format!(
+                    "grib parse failed: {:?} (at +{}) {:?}",
+                    &i[..std::cmp::min(i.len(), 20)], i.as_ptr() as usize - bytes.as_ptr() as usize, ek
+                ),
             _ => e.to_string(),
         });
     future::ready(res) // TODO:
 }
 
 fn download_grid_fut(
-    log: Arc<TaggedLog>, icon_file: Arc<icon::IconFile>
+    log: Arc<TaggedLog>, data_file: Box<dyn DataFile>
 ) -> impl Future<Output=Result<Vec<u8>, String>> {
 
-    let from = icon_file.available_from();
-    let to = icon_file.available_to();
+    let from = data_file.available_from();
+    let to = data_file.available_to();
     let now = chrono::Utc::now();
 
     let (desc, action) = if now < from {
@@ -188,6 +193,8 @@ fn download_grid_fut(
                 .map(move |i| from + chrono::Duration::minutes(i * 10))
                 .take_while(move |t| *t < to);
 
+            let data_file = Arc::new(data_file);
+
             stream::iter(attempt_schedule)
                 .then({ let log = log.clone(); move |t| {
                     let now = chrono::Utc::now();
@@ -199,8 +206,8 @@ fn download_grid_fut(
                         future::ready( () ).right_future()
                     }
                     .then({
-                        let log = log.clone(); let icon_file = icon_file.clone();
-                        move |()| icon_file.fetch_bytes(log)
+                        let log = log.clone(); let data_file = data_file.clone();
+                        move |()| data_file.fetch_bytes(log)
                     })
                 }})
                 .inspect_err(move |e| log.add_line(&format!("attempt stream err: {}", e)))
@@ -213,7 +220,7 @@ fn download_grid_fut(
 fn make_avail_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
 ) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
-    let icon_file = Arc::new(icon::IconFile::new(file_key.clone()));
+    let icon_file = Arc::new(icon::IconFile::new(&file_key));
     let path = icon_file.cache_filename().to_owned();
 
     log.add_line(&format!("avail grid: {}...", &path));
@@ -235,13 +242,13 @@ fn make_avail_grid_fut(
     Box::new(fut)
 }
 
-fn make_fetch_grid_fut(
+pub fn make_fetch_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
 ) -> Box<dyn Future<Output=Result<Arc<grib::GribMessage>, String>> + Send + Unpin> {
     use std::io::Read;
 
-    let icon_file = Arc::new(icon::IconFile::new(file_key.clone()));
-    let path = icon_file.cache_filename().to_owned();
+    let data_file = file_key.build_data_file();
+    let path = data_file.cache_filename().to_owned();
 
     log.add_line(&format!("fetch grid: {}...", &path));
 
@@ -256,11 +263,14 @@ fn make_fetch_grid_fut(
                 .map(move |_n| v)
         });
 
+    // TODO: do this to make sure lazy init (pickup) occurs before any new file saves.
+    let _res = DISK_CACHE.lock().map_err(|e| e.to_string()).map(|_| ());
+
     let fut = future::ready(res) // TODO:
         .or_else(move |e: String| {
             let log = log.clone();
             log.add_line(&format!("cache miss: {}", &e));
-            download_grid_fut(log.clone(), icon_file.clone())
+            download_grid_fut(log.clone(), data_file)
                 .map_ok(move |v: Vec<u8>| {
                     let res = save_to_file(&v, &path)
                         .and_then(|()| {

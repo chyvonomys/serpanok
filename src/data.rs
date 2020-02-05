@@ -1,4 +1,4 @@
-use super::{Parameter, FileKey, TaggedLog, DebugRFC3339};
+use super::{Parameter, FileKey, DataSource, TaggedLog, DebugRFC3339};
 use crate::cache;
 use crate::icon; // TODO:
 use crate::grib;
@@ -138,7 +138,7 @@ fn avail_value(
     modelrun: ModelrunSpec,
     timestep: u16,
 ) -> impl Future<Output=Result<(), String>> {
-    let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
+    let file_key = FileKey::new(DataSource::IconEu, param, modelrun.0, modelrun.1, timestep);
     cache::avail_grid(log, file_key)
         .map_err(|e| format!("avail_value error: {}", e))
 }
@@ -151,7 +151,7 @@ fn fetch_value(
     timestep: u16,
 ) -> impl Future<Output=Result<f32, String>> {
 
-    let file_key = FileKey::new(param, modelrun.0, modelrun.1, timestep);
+    let file_key = FileKey::new(DataSource::IconEu, param, modelrun.0, modelrun.1, timestep);
     cache::fetch_grid(log, file_key)
         .and_then(move |grid| {
             if icon::icon_verify_parameter(param, &grid) {
