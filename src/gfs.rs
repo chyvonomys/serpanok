@@ -23,7 +23,9 @@ fn test_gfs_fetch() {
     let key = FileKey::new(DataSource::Gfs100, Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 3);
     let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
     let f = cache::make_fetch_grid_fut(log, key)
-        .map_ok(|_x| println!("got grib message"))
+        .map_ok(|grib| {
+            println!("{:#?}", grib);
+        })
         .map_err(|e| println!("error {}", e));
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     assert_eq!(rt.block_on(f), Ok(()));

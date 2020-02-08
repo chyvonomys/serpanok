@@ -1,4 +1,4 @@
-use nom::{named, named_args, do_parse, call, apply, verify, tag, alt, map, take, opt, flat_map, switch, value, count};
+use nom::{named, named_args, do_parse, call, apply, verify, tag, alt, map, take, opt, flat_map, switch, value, count, bits, take_bits};
 use nom::{be_u8, be_u16, be_u32, be_u64, be_f32};
 
 #[derive(Debug)]
@@ -234,14 +234,15 @@ enum SpatialDiffOrder {
 
 #[derive(Debug)]
 pub enum Packing {
-    Simple {r: f32, e: i16, d: i16, bits: u8},
+    Simple {r: f32, e: i16, d: i16, x2_bits: u8},
     Jpeg2000 {r: f32, e: i16, d: i16, bits: u8},
     ComplexSpatialDiff {
-        r: f32, e: i16, d: i16, bits: u8,
+        r: f32, e: i16, d: i16, x1_bits: u8,
         ng: u32,
         sd_order: SpatialDiffOrder, sd_bytes: u8,
-        group_width_bits: u8,
-        group_length_bits: u8
+        group_width_ref: u8, group_width_bits: u8,
+        group_length_ref: u32, group_length_incr: u8,
+        last_group_length: u32, group_length_bits: u8,
     },
 }
 
@@ -250,10 +251,10 @@ named!(parse_simple_packing<Packing>, do_parse!(
     r: call!(be_f32) >>
     e: call!(parse_i16) >>
     d: call!(parse_i16) >>
-    bits: call!(be_u8) >>
+    x2_bits: call!(be_u8) >>
     _field_type: tag!(&[0]) >>
 
-    (Packing::Simple{r, e, d, bits})
+    (Packing::Simple{r, e, d, x2_bits})
 ));
 
 named!(parse_complex_packing_spatial_diff<Packing>, do_parse!(
@@ -262,7 +263,7 @@ named!(parse_complex_packing_spatial_diff<Packing>, do_parse!(
     r: call!(be_f32) >>
     e: call!(parse_i16) >>
     d: call!(parse_i16) >>
-    bits: call!(be_u8) >>
+    x1_bits: call!(be_u8) >> // 20
     _field_type: tag!(&[0]) >>
     // Template 5.2
     _group_splitting_method_used: tag!(&[1]) >>              // 22, CodeTable 5.4
@@ -270,21 +271,25 @@ named!(parse_complex_packing_spatial_diff<Packing>, do_parse!(
     _primary_missing_value_substitute: call!(be_u32) >>      // 24-27
     _secondary_missing_value_substitute: call!(be_u32) >>    // 28-31
     number_of_groups_of_data_values: call!(be_u32) >>        // 32-35, 'NG'
-    _reference_for_group_widths: tag!(&[0]) >>               // 36, Note ( 12)
-    _number_of_bits_used_for_the_group_widths: tag!(&[4]) >> // 37
-    _reference_for_group_lengths: tag!(&[0, 0, 0, 1]) >>     // 38-41, Note ( 13)
-    _length_increment_for_the_group_lengths: tag!(&[1]) >>   // 42, Note ( 14)
-    _true_length_of_last_group: tag!(&[0, 0, 0, 104]) >>     // 43-46
-    _number_of_bits_for_scaled_group_lengths: tag!(&[8]) >>  // 47
+    reference_for_group_widths: call!(be_u8) >>              // 36, Note ( 12)
+    number_of_bits_used_for_the_group_widths: call!(be_u8) >>// 37
+    reference_for_group_lengths: call!(be_u32) >>            // 38-41, Note ( 13)
+    length_increment_for_the_group_lengths: call!(be_u8) >>  // 42, Note ( 14)
+    true_length_of_last_group: call!(be_u32) >>              // 43-46
+    number_of_bits_for_scaled_group_lengths: call!(be_u8) >> // 47
     // Template 5.3
     _order_of_spatial_differencing: tag!(&[2]) >>            // 48, CodeTable 5.6
     _number_of_octets_extra_descriptors: tag!(&[2]) >>       // 49
 
     (Packing::ComplexSpatialDiff {
-        r, e, d, bits, ng: number_of_groups_of_data_values,
+        r, e, d, x1_bits, ng: number_of_groups_of_data_values,
         sd_order: SpatialDiffOrder::Second, sd_bytes: 2 /* @49 */,
-        group_width_bits: 4 /* @37 */,
-        group_length_bits: 8 /* @47 */,
+        group_width_ref: reference_for_group_widths,
+        group_width_bits: number_of_bits_used_for_the_group_widths,
+        group_length_ref: reference_for_group_lengths,
+        group_length_incr: length_increment_for_the_group_lengths,
+        last_group_length: true_length_of_last_group,
+        group_length_bits: number_of_bits_for_scaled_group_lengths,
     })
 ));
 
@@ -319,11 +324,11 @@ pub enum CodedValues {
     RawJpeg2000(Vec<u8>),
     Simple16Bit(Vec<u16>),
     ComplexSpatialDiff {
-        h1_h2_hmin: Vec<u8>, // 3 * @49
-        packed_group_refs: Vec<u8>, // ng * @20 + pad
-        packed_group_widths: Vec<u8>, // ng * @37 + pad
-        packed_scaled_group_lenghts: Vec<u8>, // ng * @47 + pad
-        packed_values: Vec<u8>,
+        h1: u32,
+        h2: u32,
+        hmin: u32,
+        x1s: Vec<u32>,
+        x2s: Vec<u32>,
     },
 }
 
@@ -364,10 +369,10 @@ impl fmt::Debug for Section7 {
         write!(f, "Section7 {{ coded_values: <{}> }} ", match &self.coded_values {
             CodedValues::RawJpeg2000(v) => format!("Jpeg2000 {} bytes", v.len()),
             CodedValues::Simple16Bit(v) => format!("{} 16bit values", v.len()),
-            CodedValues::ComplexSpatialDiff{ ..
-                //h1_h2_hmin, packed_group_refs, packed_group_widths,
-                //packed_scaled_group_lenghts, packed_values,
-            } => format!("Complex packing + spatial differencing"),
+            CodedValues::ComplexSpatialDiff{ h1, h2, hmin, x1s, x2s } => format!(
+                "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} items\nX2={} items",
+                h1, h2, hmin, x1s.len(), x2s.len()
+            ),
         })
     }
 }
@@ -393,32 +398,49 @@ fn octets_for(n: u32, width: u8) -> usize {
     (total / 8 + if total % 8 == 0 { 0 } else { 1 }) as usize
 }
 
-named_args!(parse_section7_template3(ng: u32, oct49: u8, oct20: u8, oct37: u8, oct47: u8)<Section7>, do_parse!(
+named_args!(parse_section7_template3(
+    nvalues: u32, ng: u32, sd_bytes: u8, x1_bits: u8,
+    group_width_ref: u8, group_width_bits: u8,
+    group_length_ref: u32, group_length_incr: u8, last_group_length: u32, group_length_bits: u8
+)<Section7>, do_parse!(
     length: call!(be_u32) >>
     _section_id: tag!(&[7]) >>
-    sz: value!({
-        let a = 3 * oct49 as usize;
-        let b = octets_for(ng, oct20);
-        let c = octets_for(ng, oct37);
-        let d = octets_for(ng, oct47);
-        let rest = length as usize - 5 - a - b - c - d;
-        println!("l={}, ng={}, {}/{}/{}/{}, {}", length, ng, a, b, c, d, rest);
-        (a, b, c, d, rest)
-    }) >>
-    h1_h2_hmin: count!(be_u8, sz.0) >>
-    packed_group_refs: count!(be_u8, sz.1) >>
-    packed_group_widths: count!(be_u8, sz.2) >>
-    packed_scaled_group_lenghts: count!(be_u8, sz.3) >>
-    packed_values: count!(be_u8, sz.4) >>
+    ww: value!(3 * sd_bytes as usize) >>
+    xx: value!(octets_for(ng, x1_bits)) >>
+    yy: value!(octets_for(ng, group_width_bits)) >>
+    zz: value!(octets_for(ng, group_length_bits)) >>
+    nn: value!(length as usize - 5 - ww - xx - yy - zz) >>
+    h1: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
+    h2: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
+    hmin: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
+    x1s: flat_map!(take!(xx), bits!(count!(take_bits!(u32, x1_bits as usize), ng as usize))) >>
+    group_widths: flat_map!(take!(yy), bits!(count!(take_bits!(u32, group_width_bits as usize), ng as usize))) >>
+    ks: flat_map!(take!(zz), bits!(count!(take_bits!(u32, group_length_bits as usize), ng as usize))) >>
+    ws: value!(group_widths.iter().map(|w| group_width_ref as u32 + w).collect::<Vec<_>>()) >>
+    ls: value!(ks.iter().map(|k| group_length_ref + *k * group_length_incr as u32).collect::<Vec<_>>()) >>
+    groups: value!(ls.iter().zip(ws.iter()).map(|(l, w)| (*l, *w))) >> 
+    verify!(value!({
+        let total = ls.iter().fold(0, |acc, x| acc + x);
+        let x2len = ls.iter().zip(ws.iter()).map(|(a, b)| a * b).fold(0, |acc, x| acc + x);
+        println!("widths: {:?}\n\nls: {:?}\n\ntotal_items_calc={}\ntotal_items={}", ws, ls, total, nvalues);
+        println!("l={}, ng={}, remaining={}, x2len={}bits, ({}bytes +{}bits)", length, ng, nn, x2len, x2len/8, x2len%8);
+        (total, ls.last().map(|x| *x).unwrap_or(0))
+    }), |x: (u32, u32)| x.0 == nvalues && x.1 == last_group_length) >>
+    x2s: bits!(apply!(parse_bit_groups, groups)) >>
 
     (Section7{ coded_values: CodedValues::ComplexSpatialDiff{
-        h1_h2_hmin,
-        packed_group_refs,
-        packed_group_widths,
-        packed_scaled_group_lenghts,
-        packed_values,
+        h1, h2, hmin, x1s, x2s
     }})
 ));
+
+fn parse_bit_groups<I: Iterator<Item=(u32, u32)>>(inp: (&[u8], usize), rle: I) -> nom::IResult<(&[u8], usize), Vec<u32>> {
+    rle.fold(Ok( (inp, Vec::default()) ), |acc, (times, bits)| {
+        acc.and_then(|(inp, mut vec)| {
+            let batch = count!(inp, take_bits!(u32, bits as usize), times as usize);
+            batch.map(|(rest, chunk)| (rest, {vec.extend_from_slice(&chunk); vec}))
+        })
+    })
+}
 
 #[derive(Debug)]
 pub struct GribMessage {
@@ -449,9 +471,15 @@ named!(pub parse_message<GribMessage>, do_parse!(
     section5: flat_map!(call!(parse_section), call!(parse_section5)) >>
     _section6: tag!(&[0, 0, 0, 6, 6, 0xFF]) >>
     section7: switch!(value!(&section5.packing),
-        &Packing::Simple{ bits: 16, .. } => call!(parse_section7_template0_16bit) |
-        &Packing::ComplexSpatialDiff{ ng, sd_bytes, group_width_bits, bits, group_length_bits, .. } =>
-            apply!(parse_section7_template3, ng, sd_bytes, bits, group_width_bits, group_length_bits) |
+        &Packing::Simple{ x2_bits: 16, .. } => call!(parse_section7_template0_16bit) |
+        &Packing::ComplexSpatialDiff{
+            ng, sd_bytes, x1_bits,
+            group_width_ref, group_width_bits,
+            group_length_ref, group_length_incr, last_group_length, group_length_bits, ..
+        } => apply!(parse_section7_template3, section3.n_data_points, ng, sd_bytes, x1_bits,
+            group_width_ref, group_width_bits,
+            group_length_ref, group_length_incr, last_group_length, group_length_bits
+        ) |
         &Packing::Jpeg2000{..} => call!(parse_section7_template40)
     ) >>
     tag!("7777") >>

@@ -115,7 +115,7 @@ fn test_extract() {
 }
 
 fn extract_value_at(grib: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32, String> {
-    if let grib::Packing::Simple {r, e, d, bits: 16} = grib.section5.packing {
+    if let grib::Packing::Simple {r, e, d, x2_bits: 16} = grib.section5.packing {
         if let grib::CodedValues::Simple16Bit(ref v) = grib.section7.coded_values {
             let twop = 2f32.powf(f32::from(e));
             let tenp = 10f32.powf(f32::from(-d));
