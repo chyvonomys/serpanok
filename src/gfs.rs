@@ -24,10 +24,9 @@ fn test_gfs_fetch() {
     let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
     let f = cache::make_fetch_grid_fut(log, key)
         .map_ok(|_x| println!("got grib message"))
-        .map_err(|e| println!("error {}", e))
-        .map(|_res| ());
+        .map_err(|e| println!("error {}", e));
     let mut rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(f);
+    assert_eq!(rt.block_on(f), Ok(()));
 }
 
 named!(parse_usize<usize>, map_res!(map_res!(digit, std::str::from_utf8), |s: &str| s.parse::<usize>()));

@@ -1,4 +1,4 @@
-use nom::{named, named_args, do_parse, call, verify, tag, alt, map, take, opt, flat_map, switch, value, count};
+use nom::{named, named_args, do_parse, call, apply, verify, tag, alt, map, take, opt, flat_map, switch, value, count};
 use nom::{be_u8, be_u16, be_u32, be_u64, be_f32};
 
 #[derive(Debug)]
@@ -46,7 +46,6 @@ named!(parse_section1<Section1>, do_parse!(
         tables_version, ref_time
     })
 ));
-
 
 struct Section2 {}
 
@@ -178,7 +177,6 @@ pub struct CommonProductDef {
 
 #[derive(Debug)]
 pub struct Section4 {
-
     pub product_def: ProductDef,
 }
 
@@ -216,11 +214,35 @@ named!(parse_common_productdef<CommonProductDef>, do_parse!(
     })
 ));
 
+// CodeTable 5.4
+#[derive(Debug)]
+enum GroupSplittingMethod {
+    General, // 1
+}
+
+// CodeTable 5.5
+#[derive(Debug)]
+enum MissingValueMgmt {
+    None, // 0
+}
+
+// CodeTable 5.6
+#[derive(Debug)]
+enum SpatialDiffOrder {
+    Second // 2
+}
+
 #[derive(Debug)]
 pub enum Packing {
     Simple {r: f32, e: i16, d: i16, bits: u8},
     Jpeg2000 {r: f32, e: i16, d: i16, bits: u8},
-    ComplexSpatialDiff {r: f32, e: i16, d: i16, bits: u8},
+    ComplexSpatialDiff {
+        r: f32, e: i16, d: i16, bits: u8,
+        ng: u32,
+        sd_order: SpatialDiffOrder, sd_bytes: u8,
+        group_width_bits: u8,
+        group_length_bits: u8
+    },
 }
 
 named!(parse_simple_packing<Packing>, do_parse!(
@@ -236,27 +258,34 @@ named!(parse_simple_packing<Packing>, do_parse!(
 
 named!(parse_complex_packing_spatial_diff<Packing>, do_parse!(
     _template_id: tag!(&[0, 3]) >>
+    // Template 5.0
     r: call!(be_f32) >>
     e: call!(parse_i16) >>
     d: call!(parse_i16) >>
     bits: call!(be_u8) >>
     _field_type: tag!(&[0]) >>
-    // TODO:
-    _group_splitting: tag!(&[1]) >>
-    _missing_value_mgmt: tag!(&[0]) >>
-    _primary_missing_value_sub: call!(be_u32) >>
-    _secondary_missing_value_sub: call!(be_u32) >>
-    _n_groups: call!(be_u32) >>
-    _ref_group_widths: tag!(&[0]) >>
-    _group_width_bits: tag!(&[4]) >>
-    _ref_group_lengths: tag!(&[0, 0, 0, 1]) >>
-    _length_incr: tag!(&[1]) >>
-    _last_group_length: tag!(&[0, 0, 0, 104]) >>
-    _scaled_group_length_bits: tag!(&[8]) >>
-    _spatial_diff_order: tag!(&[2]) >>
-    _extra_descriptor_octets: tag!(&[2]) >>
+    // Template 5.2
+    _group_splitting_method_used: tag!(&[1]) >>              // 22, CodeTable 5.4
+    _missing_value_management_used: tag!(&[0]) >>            // 23, CodeTable 5.5
+    _primary_missing_value_substitute: call!(be_u32) >>      // 24-27
+    _secondary_missing_value_substitute: call!(be_u32) >>    // 28-31
+    number_of_groups_of_data_values: call!(be_u32) >>        // 32-35, 'NG'
+    _reference_for_group_widths: tag!(&[0]) >>               // 36, Note ( 12)
+    _number_of_bits_used_for_the_group_widths: tag!(&[4]) >> // 37
+    _reference_for_group_lengths: tag!(&[0, 0, 0, 1]) >>     // 38-41, Note ( 13)
+    _length_increment_for_the_group_lengths: tag!(&[1]) >>   // 42, Note ( 14)
+    _true_length_of_last_group: tag!(&[0, 0, 0, 104]) >>     // 43-46
+    _number_of_bits_for_scaled_group_lengths: tag!(&[8]) >>  // 47
+    // Template 5.3
+    _order_of_spatial_differencing: tag!(&[2]) >>            // 48, CodeTable 5.6
+    _number_of_octets_extra_descriptors: tag!(&[2]) >>       // 49
 
-    (Packing::ComplexSpatialDiff{r, e, d, bits})
+    (Packing::ComplexSpatialDiff {
+        r, e, d, bits, ng: number_of_groups_of_data_values,
+        sd_order: SpatialDiffOrder::Second, sd_bytes: 2 /* @49 */,
+        group_width_bits: 4 /* @37 */,
+        group_length_bits: 8 /* @47 */,
+    })
 ));
 
 named!(parse_jpeg2000_packing<Packing>, do_parse!(
@@ -289,7 +318,40 @@ named!(parse_section5<Section5>, do_parse!(
 pub enum CodedValues {
     RawJpeg2000(Vec<u8>),
     Simple16Bit(Vec<u16>),
+    ComplexSpatialDiff {
+        h1_h2_hmin: Vec<u8>, // 3 * @49
+        packed_group_refs: Vec<u8>, // ng * @20 + pad
+        packed_group_widths: Vec<u8>, // ng * @37 + pad
+        packed_scaled_group_lenghts: Vec<u8>, // ng * @47 + pad
+        packed_values: Vec<u8>,
+    },
 }
+
+/*
+Template 5.2 Notes
+( 12) The group width is the number of bits used for every value in a group.
+( 13) The group length (L) is the number of values in a group.
+( 14) The essence of the complex packing method is to subdivide a field of values into NG groups,
+where the values in each group have similar sizes. In this procedure, it is necessary to retain
+enough information to recover the group lengths upon decoding. The NG group lengths for any given
+field can be described by Ln = ref + Kn * len_inc, n = 1,NG, where ref is given by octets 38-41
+and len_inc by octet 42. The NG values of K (the scaled group lengths) are stored in the Data
+Section, each with the number of bits specified by octet 47. Since the last group is a special
+case which may not be able to be specified by this relationship, the length of the last group is
+stored in octets 43-46.
+*/
+
+/*
+Template 5.3 Notes
+( 1) Spatial differencing is a pre-processing before group splitting at encoding time. It is
+intended to reduce the size of sufficiently smooth fields, when combined with a splitting scheme
+as described in Data Representation Template 5.2. At order 1, an initial field of values f is
+replaced by a new field of values g, where g1 = f1, g2 = f2 - f1, ..., gn = fn - fn-1. At order 2,
+the field of values g is itself replaced by a new field of values h, where h1 = f1, h2 = f2, h3 =
+g3 - g2, ..., hn = gn - gn-1. To keep values positive, the overall minimum of the resulting field
+(either gmin or hmin) is removed. At decoding time, after bit string unpacking, the original
+scaled values are recovered by adding the overall minimum and summing up recursively.
+*/
 
 pub struct Section7 {
     pub coded_values: CodedValues,
@@ -302,25 +364,60 @@ impl fmt::Debug for Section7 {
         write!(f, "Section7 {{ coded_values: <{}> }} ", match &self.coded_values {
             CodedValues::RawJpeg2000(v) => format!("Jpeg2000 {} bytes", v.len()),
             CodedValues::Simple16Bit(v) => format!("{} 16bit values", v.len()),
+            CodedValues::ComplexSpatialDiff{ ..
+                //h1_h2_hmin, packed_group_refs, packed_group_widths,
+                //packed_scaled_group_lenghts, packed_values,
+            } => format!("Complex packing + spatial differencing"),
         })
     }
 }
 
-named_args!(parse_section7<'a>(p: &Packing)<Section7>, do_parse!(
+named!(parse_section7_template40<Section7>, do_parse!(
     length: call!(be_u32) >>
     _section_id: tag!(&[7]) >>
-    coded_values: flat_map!(
-        take!(length - 5),
-        switch!(value!(match p {
-            Packing::Simple{bits: 16, ..} => true,
-            _ => false,
-        }),
-                true => map!(count!(be_u16, ((length - 5) / 2) as usize), |v| CodedValues::Simple16Bit(v)) |
-                false => map!(count!(be_u8, (length - 5) as usize),        |v| CodedValues::RawJpeg2000(v))
-        )
-    ) >>
+    coded_values: map!(count!(be_u8, (length - 5) as usize), |v| CodedValues::RawJpeg2000(v)) >>
 
     (Section7 { coded_values })
+));
+
+named!(parse_section7_template0_16bit<Section7>, do_parse!(
+    length: call!(be_u32) >>
+    _section_id: tag!(&[7]) >>
+    coded_values: map!(count!(be_u16, ((length - 5) / 2) as usize), |v| CodedValues::Simple16Bit(v)) >>
+
+    (Section7 { coded_values })
+));
+
+fn octets_for(n: u32, width: u8) -> usize {
+    let total = n * width as u32;
+    (total / 8 + if total % 8 == 0 { 0 } else { 1 }) as usize
+}
+
+named_args!(parse_section7_template3(ng: u32, oct49: u8, oct20: u8, oct37: u8, oct47: u8)<Section7>, do_parse!(
+    length: call!(be_u32) >>
+    _section_id: tag!(&[7]) >>
+    sz: value!({
+        let a = 3 * oct49 as usize;
+        let b = octets_for(ng, oct20);
+        let c = octets_for(ng, oct37);
+        let d = octets_for(ng, oct47);
+        let rest = length as usize - 5 - a - b - c - d;
+        println!("l={}, ng={}, {}/{}/{}/{}, {}", length, ng, a, b, c, d, rest);
+        (a, b, c, d, rest)
+    }) >>
+    h1_h2_hmin: count!(be_u8, sz.0) >>
+    packed_group_refs: count!(be_u8, sz.1) >>
+    packed_group_widths: count!(be_u8, sz.2) >>
+    packed_scaled_group_lenghts: count!(be_u8, sz.3) >>
+    packed_values: count!(be_u8, sz.4) >>
+
+    (Section7{ coded_values: CodedValues::ComplexSpatialDiff{
+        h1_h2_hmin,
+        packed_group_refs,
+        packed_group_widths,
+        packed_scaled_group_lenghts,
+        packed_values,
+    }})
 ));
 
 #[derive(Debug)]
@@ -351,7 +448,12 @@ named!(pub parse_message<GribMessage>, do_parse!(
     section4: flat_map!(call!(parse_section), call!(parse_section4)) >>
     section5: flat_map!(call!(parse_section), call!(parse_section5)) >>
     _section6: tag!(&[0, 0, 0, 6, 6, 0xFF]) >>
-    section7: call!(parse_section7, &section5.packing) >>
+    section7: switch!(value!(&section5.packing),
+        &Packing::Simple{ bits: 16, .. } => call!(parse_section7_template0_16bit) |
+        &Packing::ComplexSpatialDiff{ ng, sd_bytes, group_width_bits, bits, group_length_bits, .. } =>
+            apply!(parse_section7_template3, ng, sd_bytes, bits, group_width_bits, group_length_bits) |
+        &Packing::Jpeg2000{..} => call!(parse_section7_template40)
+    ) >>
     tag!("7777") >>
         
     ( GribMessage {
