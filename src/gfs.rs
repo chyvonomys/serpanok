@@ -20,12 +20,24 @@ fn test_parse_inventory() {
 #[test]
 fn test_gfs_fetch() {
     use crate::cache;
+    use crate::grib;
+    use crate::data;
     let key = FileKey::new(DataSource::Gfs100, Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 3);
     let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
     let f = cache::make_fetch_grid_fut(log, key)
-        .map_ok(|grib| {
-            println!("{:#?}", grib);
+        .inspect_ok(|msg| println!("{:#?}", msg))
+        .map(|res| res.and_then(|msg| grib::decode_original_values(&msg).map(|vs| (msg, vs))))
+        .inspect_ok(|(_, vs)| {
+            let mm = vs.iter().fold(None, |acc, x| match acc {
+                None => Some((x, x)),
+                Some((mi, ma)) => Some((if mi < x { mi } else { x }, if ma > x { ma } else { x })),
+            });
+            println!("{:?}\n{} values, minmax={:?}", &vs[..std::cmp::min(10, vs.len())], vs.len(), mm);
         })
+        .map_ok(|(msg, vs)| println!(
+            "value at lat={} lon={} is {:?}", 50.62, 26.25,
+            data::extract_value_impl(&vs, &msg.section3, 50.62, 26.25)
+        ))
         .map_err(|e| println!("error {}", e));
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     assert_eq!(rt.block_on(f), Ok(()));

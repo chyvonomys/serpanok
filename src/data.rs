@@ -46,7 +46,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a * (1.0 - t) + b * t
 }
 
-fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -> Result<f32, String> {
+pub fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -> Result<f32, String> {
     let lat = (latf * 1_000_000.0) as i32;
     let lon = (lonf * 1_000_000.0) as i32;
 
@@ -114,21 +114,10 @@ fn test_extract() {
     assert!(extract_value_impl(&values, &s3, 70.5 + 0.00001,  45.0 + 0.00001).is_err());
 }
 
-fn extract_value_at(grib: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32, String> {
-    if let grib::Packing::Simple {r, e, d, x2_bits: 16} = grib.section5.packing {
-        if let grib::CodedValues::Simple16Bit(ref v) = grib.section7.coded_values {
-            let twop = 2f32.powf(f32::from(e));
-            let tenp = 10f32.powf(f32::from(-d));
-            Ok(v.iter().map(
-                |x| (r + f32::from(*x) * twop) * tenp
-            ).collect_vec())
-        } else {
-            Err("unsupported coded_values".to_owned())
-        }
-    } else {
-        Err("unsupported packing".to_owned())
-    }
-    .and_then(|ys| extract_value_impl(&ys, &grib.section3, lat, lon))
+// TODO: optimize, don't decode whohe grid
+fn extract_value_at(msg: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32, String> {
+    grib::decode_original_values(msg)
+        .and_then(|ys| extract_value_impl(&ys, &msg.section3, lat, lon))
 }
 
 fn avail_value(

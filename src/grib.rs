@@ -1,5 +1,9 @@
-use nom::{named, named_args, do_parse, call, apply, verify, tag, alt, map, take, opt, flat_map, switch, value, count, bits, take_bits};
-use nom::{be_u8, be_u16, be_u32, be_u64, be_f32};
+use nom::{
+    named, named_args, do_parse, call, apply, verify, value,
+    map, flat_map, count, alt, switch, opt,
+    bits, tag, tag_bits, take, take_bits,
+    be_u8, be_u16, be_u32, be_u64, be_f32
+};
 
 #[derive(Debug)]
 pub struct Section1 {
@@ -326,8 +330,8 @@ pub enum CodedValues {
     ComplexSpatialDiff {
         h1: u32,
         h2: u32,
-        hmin: u32,
-        x1s: Vec<u32>,
+        hmin: i32,
+        x1rle: Vec<(usize, u32)>,
         x2s: Vec<u32>,
     },
 }
@@ -358,6 +362,51 @@ g3 - g2, ..., hn = gn - gn-1. To keep values positive, the overall minimum of th
 scaled values are recovered by adding the overall minimum and summing up recursively.
 */
 
+pub fn decode_original_values(msg: &GribMessage) -> Result<Vec<f32>, String> {
+    match msg {
+        GribMessage{
+            section5: Section5{ packing: Packing::Simple {r, e, d, x2_bits: 16}, .. },
+            section7: Section7{ coded_values: CodedValues::Simple16Bit(ref x2s) },
+            ..
+        } => {
+            let twop = 2f32.powf(f32::from(*e));
+            let tenp = 10f32.powf(f32::from(-d));
+            let vec = x2s.iter().map(
+                |x2| (r + f32::from(*x2) * twop) * tenp
+            ).collect();
+            Ok(vec)
+        },
+        GribMessage{
+            section5: Section5{ packing: Packing::ComplexSpatialDiff {r, e, d, ..}, .. },
+            section7: Section7{ coded_values: CodedValues::ComplexSpatialDiff {h1, h2, hmin, ref x1rle, ref x2s} },
+            ..
+        } => {
+            let hs = x2s.iter()
+                .zip(x1rle.iter().flat_map(|(n, v)| std::iter::repeat(v).take(*n)))
+                .map(|(x1, x2)| *x1 + *x2);
+
+            let (mut fs, _, _) = hs.skip(2).fold(
+                (vec![*h1 as f32, *h2 as f32], *h1 as i32, *h2 as i32),
+                |(mut vec, f_, f__), h| {
+                    let f = h as i32 + 2 * f_ - f__ + *hmin;
+                    vec.push(f as f32);
+                    (vec, f, f_)
+                }
+            );
+
+            let twop = 2f32.powf(f32::from(*e));
+            let tenp = 10f32.powf(f32::from(-d));
+
+            for f in fs.iter_mut() {
+                *f = (r + *f * twop) * tenp;
+            }
+
+            Ok(fs)
+        },
+        _ => Err("unsupported packing".to_owned()),
+    }
+}
+
 pub struct Section7 {
     pub coded_values: CodedValues,
 }
@@ -369,9 +418,11 @@ impl fmt::Debug for Section7 {
         write!(f, "Section7 {{ coded_values: <{}> }} ", match &self.coded_values {
             CodedValues::RawJpeg2000(v) => format!("Jpeg2000 {} bytes", v.len()),
             CodedValues::Simple16Bit(v) => format!("{} 16bit values", v.len()),
-            CodedValues::ComplexSpatialDiff{ h1, h2, hmin, x1s, x2s } => format!(
-                "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} items\nX2={} items",
-                h1, h2, hmin, x1s.len(), x2s.len()
+            CodedValues::ComplexSpatialDiff{ h1, h2, hmin, x1rle, x2s } => format!(
+                "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} pairs, {:?}\nX2={} data points, {:?}",
+                h1, h2, hmin,
+                x1rle.len(), &x1rle[..std::cmp::min(10, x1rle.len())],
+                x2s.len(), &x2s[..std::cmp::min(10, x2s.len())]
             ),
         })
     }
@@ -412,12 +463,17 @@ named_args!(parse_section7_template3(
     nn: value!(length as usize - 5 - ww - xx - yy - zz) >>
     h1: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
     h2: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
-    hmin: bits!(take_bits!(u32, sd_bytes as usize * 8)) >>
+    hmin: bits!(alt!(
+        do_parse!(tag_bits!(u8, 1, 0x1) >> x: take_bits!(u32, sd_bytes as usize * 8 - 1) >> (-(x as i32))) |
+        do_parse!(tag_bits!(u8, 1, 0x0) >> x: take_bits!(u32, sd_bytes as usize * 8 - 1) >> (x as i32))
+    )) >>
     x1s: flat_map!(take!(xx), bits!(count!(take_bits!(u32, x1_bits as usize), ng as usize))) >>
     group_widths: flat_map!(take!(yy), bits!(count!(take_bits!(u32, group_width_bits as usize), ng as usize))) >>
     ks: flat_map!(take!(zz), bits!(count!(take_bits!(u32, group_length_bits as usize), ng as usize))) >>
     ws: value!(group_widths.iter().map(|w| group_width_ref as u32 + w).collect::<Vec<_>>()) >>
     ls: value!(ks.iter().map(|k| group_length_ref + *k * group_length_incr as u32).collect::<Vec<_>>()) >>
+    verify!(value!( (x1s.len(), ls.len()) ), |(a, b)| a == b) >>
+    x1rle: value!(ls.iter().zip(x1s.iter()).map(|(l, v)| (*l as usize, *v)).collect::<Vec<_>>()) >>
     groups: value!(ls.iter().zip(ws.iter()).map(|(l, w)| (*l, *w))) >> 
     verify!(value!({
         let total = ls.iter().fold(0, |acc, x| acc + x);
@@ -429,7 +485,7 @@ named_args!(parse_section7_template3(
     x2s: bits!(apply!(parse_bit_groups, groups)) >>
 
     (Section7{ coded_values: CodedValues::ComplexSpatialDiff{
-        h1, h2, hmin, x1s, x2s
+        h1, h2, hmin, x1rle, x2s
     }})
 ));
 
