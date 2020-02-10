@@ -46,7 +46,14 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a * (1.0 - t) + b * t
 }
 
-pub fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -> Result<f32, String> {
+#[derive(Debug)]
+pub enum SamplingError {
+    UnsupportedScanMode,
+    OutsideOfDomain,
+    InvalidDomain,
+}
+
+pub fn sample_value(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -> Result<f32, SamplingError> {
     let lat = (latf * 1_000_000.0) as i32;
     let lon = (lonf * 1_000_000.0) as i32;
 
@@ -61,13 +68,31 @@ pub fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: 
 
     let cols = s3.ni;
 
-    if lat >= lat0 && lat <= lat1 && lon >= lon0 && lon <= lon1 {
+    match s3.scan_mode {
+        grib::ScanMode{col_major: false, zigzag: false, i_neg: false, j_pos: true} => {
+            if lat1 > lat0 {
+                if lat >= lat0 && lat <= lat1 && lon >= lon0 && lon <= lon1 {
+                    let j0 = (lat - lat0) as u32 / lat_step;
+                    let jt = (lat - lat0) as u32 % lat_step;
+                    Ok((j0, jt))
+                } else { Err(SamplingError::OutsideOfDomain) }
+            } else { Err(SamplingError::InvalidDomain) }
+        },
+        grib::ScanMode{col_major: false, zigzag: false, i_neg: false, j_pos: false} => {
+            if lat0 > lat1 {
+                if lat >= lat1 && lat < lat0 && lon >= lon0 && lon <= lon1 {
+                    let j0 = (lat0 - lat) as u32 / lat_step;
+                    let jt = (lat0 - lat) as u32 % lat_step;
+                    Ok((j0, jt))
+                } else { Err(SamplingError::OutsideOfDomain) }
+            } else { Err(SamplingError::InvalidDomain) }
+        },
+        _ => Err(SamplingError::UnsupportedScanMode),
+    }
+    .map(|(j0, jt)| {
         let i0 = (lon - lon0) as u32 / lon_step;
         let it = (lon - lon0) as u32 % lon_step;
         let i1 = if it == 0 { i0 } else { i0 + 1 };
-
-        let j0 = (lat - lat0) as u32 / lat_step;
-        let jt = (lat - lat0) as u32 % lat_step;
         let j1 = if jt == 0 { j0 } else { j0 + 1 };
 
         let x00 = values[(j0 * cols + i0) as usize];
@@ -78,12 +103,8 @@ pub fn extract_value_impl(values: &[f32], s3: &grib::Section3, latf: f32, lonf: 
         let xt = it as f32 / lon_step as f32;
         let yt = jt as f32 / lat_step as f32;
 
-        let x = lerp(lerp(x00, x10, xt), lerp(x01, x11, xt), yt);
-
-        Ok(x)
-    } else {
-        Err(format!("target point {} {} is not in range {}..{}, {}..{}", lon, lat, lon0, lon1, lat0, lat1))
-    }
+        lerp(lerp(x00, x10, xt), lerp(x01, x11, xt), yt)
+    })
 }
 
 #[test]
@@ -97,27 +118,28 @@ fn test_extract() {
 		lat_last: 70500000,
 		lon_last: 45000000,
 		di: 62500,
-		dj: 62500,
+        dj: 62500,
+        scan_mode: grib::ScanMode{i_neg: false, j_pos: true, col_major: false, zigzag: false},
     };
 
     let mut values = Vec::new();
     values.resize(s3.n_data_points as usize, 0.0);
 
-    assert!(extract_value_impl(&values, &s3, 29.5, -23.5).is_ok());
-    assert!(extract_value_impl(&values, &s3, 29.5,  45.0).is_ok());
-    assert!(extract_value_impl(&values, &s3, 70.5, -23.5).is_ok());
-    assert!(extract_value_impl(&values, &s3, 70.5,  45.0).is_ok());
+    assert!(sample_value(&values, &s3, 29.5, -23.5).is_ok());
+    assert!(sample_value(&values, &s3, 29.5,  45.0).is_ok());
+    assert!(sample_value(&values, &s3, 70.5, -23.5).is_ok());
+    assert!(sample_value(&values, &s3, 70.5,  45.0).is_ok());
 
-    assert!(extract_value_impl(&values, &s3, 29.5 - 0.00001, -23.5 - 0.00001).is_err());
-    assert!(extract_value_impl(&values, &s3, 29.5 - 0.00001,  45.0 + 0.00001).is_err());
-    assert!(extract_value_impl(&values, &s3, 70.5 + 0.00001, -23.5 - 0.00001).is_err());
-    assert!(extract_value_impl(&values, &s3, 70.5 + 0.00001,  45.0 + 0.00001).is_err());
+    assert!(sample_value(&values, &s3, 29.5 - 0.00001, -23.5 - 0.00001).is_err());
+    assert!(sample_value(&values, &s3, 29.5 - 0.00001,  45.0 + 0.00001).is_err());
+    assert!(sample_value(&values, &s3, 70.5 + 0.00001, -23.5 - 0.00001).is_err());
+    assert!(sample_value(&values, &s3, 70.5 + 0.00001,  45.0 + 0.00001).is_err());
 }
 
-// TODO: optimize, don't decode whohe grid
+// TODO: optimize, don't decode whole grid
 fn extract_value_at(msg: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32, String> {
     grib::decode_original_values(msg)
-        .and_then(|ys| extract_value_impl(&ys, &msg.section3, lat, lon))
+        .and_then(|ys| sample_value(&ys, &msg.section3, lat, lon).map_err(|e| format!("{:?}", e)))
 }
 
 fn avail_value(

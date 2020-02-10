@@ -5,6 +5,24 @@ use nom::{
     be_u8, be_u16, be_u32, be_u64, be_f32
 };
 
+named!(parse_i16<i16>, map!(be_u16, |n| {
+    let i = (n & 0x7FFF) as i16;
+    if n & 0x8000 == 0x8000 {
+        -i
+    } else {
+        i
+    }
+}));
+
+named!(parse_i32<i32>, map!(be_u32, |n| {
+    let i = (n & 0x7FFF_FFFF) as i32;
+    if n & 0x8000_0000 == 0x8000_0000 {
+        -i
+    } else {
+        i
+    }
+}));
+
 #[derive(Debug)]
 pub struct Section1 {
     pub tables_version: u8,
@@ -72,35 +90,38 @@ pub struct Section3 {
     pub lon_last: i32,
     pub di: u32,
     pub dj: u32,
+    pub scan_mode: ScanMode,
 }
 
-named!(parse_i16<i16>, map!(be_u16, |n| {
-    let i = (n & 0x7FFF) as i16;
-    if n & 0x8000 == 0x8000 {
-        -i
-    } else {
-        i
-    }
-}));
+#[derive(Debug)]
+pub struct ScanMode {
+    pub i_neg: bool,
+    pub j_pos: bool,
+    pub col_major: bool,
+    pub zigzag: bool,
+}
 
-named!(parse_i32<i32>, map!(be_u32, |n| {
-    let i = (n & 0x7FFF_FFFF) as i32;
-    if n & 0x8000_0000 == 0x8000_0000 {
-        -i
-    } else {
-        i
-    }
-}));
+named!(parse_scanmode<ScanMode>, bits!(do_parse!(
+    i_neg: map!(take_bits!(u8, 1), |b| b == 1) >>
+    j_pos: map!(take_bits!(u8, 1), |b| b == 1) >>
+    col_major: map!(take_bits!(u8, 1), |b| b == 1) >>
+    zigzag: map!(take_bits!(u8, 1), |b| b == 1) >>
+    tag_bits!(u8, 4, 0) >>
 
+    (ScanMode { i_neg, j_pos, col_major, zigzag })
+)));
+
+// Grid Definition Section
 named!(parse_section3<Section3>, do_parse!(
     _length: verify!(be_u32, |n| n == 72) >>
     _section_id: tag!(&[3]) >>
-    _grid_def_src: tag!(&[0]) >>
+    _grid_def_src: tag!(&[0]) >> // CodeTable 3.0
     n_data_points: call!(be_u32) >>
     _n_points_bytes: tag!(&[0]) >>
-    _n_points_interp: tag!(&[0]) >>
-    _grid_def_template: tag!(&[0, 0]) >>
-    _earth_shape: tag!(&[6]) >>
+    _n_points_interpetation: tag!(&[0]) >> // CodeTable 3.11
+    // Template 3.0
+    _grid_def_template: tag!(&[0, 0]) >> // CodeTable 3.1
+    _earth_shape: tag!(&[6]) >> // CodeTable 3.2
     _scales: alt!(tag!(&[0xFF; 15]) | tag!(&[0; 15])) >> // GFS has zeros
     ni: call!(be_u32) >>
     nj: call!(be_u32) >>
@@ -108,19 +129,19 @@ named!(parse_section3<Section3>, do_parse!(
     _basic_angle_subdiv: tag!(&[0xFF; 4]) >>
     lat_first: call!(parse_i32) >>
     lon_first: call!(parse_i32) >>
-    _res_comp_flags: tag!(&[0b0011_0000]) >>
+    _res_comp_flags: tag!(&[0b0011_0000]) >> // FlagTable 3.3
     lat_last: call!(parse_i32) >>
     lon_last: call!(parse_i32) >>
     di: call!(be_u32) >>
     dj: call!(be_u32) >>
-    _scan_mode: alt!(tag!(&[0b0100_0000]) | tag!(&[0b0000_0000])) >> // GFS has all zeros, TODO:
+    scan_mode: call!(parse_scanmode) >> // FlagTable 3.4
+    _n_points: take!(0) >>
   
     (Section3 {
-        n_data_points, ni, nj, di, dj,
+        n_data_points, ni, nj, di, dj, scan_mode,
         lat_first, lon_first, lat_last, lon_last,
     })
 ));
-
 
 #[derive(Debug)]
 pub enum ProductDef {
@@ -478,8 +499,13 @@ named_args!(parse_section7_template3(
     verify!(value!({
         let total = ls.iter().fold(0, |acc, x| acc + x);
         let x2len = ls.iter().zip(ws.iter()).map(|(a, b)| a * b).fold(0, |acc, x| acc + x);
-        println!("widths: {:?}\n\nls: {:?}\n\ntotal_items_calc={}\ntotal_items={}", ws, ls, total, nvalues);
-        println!("l={}, ng={}, remaining={}, x2len={}bits, ({}bytes +{}bits)", length, ng, nn, x2len, x2len/8, x2len%8);
+        let wsmin = ws.iter().min().map(|x| *x);
+        let wsmax = ws.iter().max().map(|x| *x);
+        let lsmin = ls.iter().min().map(|x| *x);
+        let lsmax = ls.iter().max().map(|x| *x);
+        println!(
+            "ws min:{:?} max:{:?}\nls: min:{:?} max:{:?}\nitems_calc={}\nitems={}\nl={}, ng={}, rem={}, x2len={}bits, ({}bytes +{}bits)",
+            wsmin, wsmax, lsmin, lsmax, total, nvalues, length, ng, nn, x2len, x2len/8, x2len%8);
         (total, ls.last().map(|x| *x).unwrap_or(0))
     }), |x: (u32, u32)| x.0 == nvalues && x.1 == last_group_length) >>
     x2s: bits!(apply!(parse_bit_groups, groups)) >>
