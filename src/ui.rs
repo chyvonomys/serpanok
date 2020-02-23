@@ -358,12 +358,12 @@ fn mode_screen(chat_id: i64, widget_msg_id: i32) -> impl Future<Output=Result<Op
 type HourGrid = Vec<Vec<Option<(u8, chrono::DateTime<chrono::Utc>)>>>;
 
 fn day_screen(
-    chat_id: i64, widget_msg_id: i32, tz: &chrono_tz::Tz
+    chat_id: i64, widget_msg_id: i32, tz: chrono_tz::Tz
 ) -> impl Future<Output=Result<Option<(Ymd, HourGrid)>, String>> {
 
     let mut days_map: HashMap<String, (Ymd, HourGrid)> = HashMap::new();
 
-    let v = time_picker(chrono::Utc::now().with_timezone(tz));
+    let v = time_picker(chrono::Utc::now().with_timezone(&tz));
     let first = v.iter().take(3).map(|(ymd, ts)| {
             let t = format!("{:02}.{:02}", ymd.2, ymd.1);
             days_map.insert(t.clone(), (*ymd, ts.clone()));
@@ -433,7 +433,7 @@ fn pick_datetime(
     chat_id: i64, widget_msg_id: i32, state: &WidgetState
 ) -> impl Future<Output=Result<Option<chrono::DateTime<chrono::Utc>>, String>> {
 
-    day_screen(chat_id, widget_msg_id, &state.tz)
+    day_screen(chat_id, widget_msg_id, state.tz)
         .and_then(move |opt_next| match opt_next {
             Some((_ymd, tss)) => time_screen(chat_id, widget_msg_id, tss).left_future(),
             None => future::ok(None).right_future(),
@@ -725,7 +725,7 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
             SeUpdateVariant::CBQ {id, msg_id, data} =>
                 if data == PADDING_DATA { // TODO: this is wrong place to check this
                     Box::new(tg_answer_cbq(id, Some(PADDING_BTN_MSG.to_owned()))
-                             .map_err(|e| format!("answer stub cbq error: {}", e.to_string())))
+                             .map_err(|e| format!("answer stub cbq error: {}", e)))
                 } else {
                     // push choice into channel for (chat, msg_id) conversation
                     let ok = UserClick::click(chat_id, msg_id, data)
@@ -733,7 +733,7 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                         .is_ok();
 
                     Box::new(tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
-                             .map_err(|e| format!("answer cbq error: {}", e.to_string())))
+                             .map_err(|e| format!("answer cbq error: {}", e)))
                 },
             SeUpdateVariant::Text(text) => {
                 let ok = UserInput::input(chat_id, text)
@@ -819,7 +819,7 @@ impl From<telegram::TgUpdate> for SeUpdate {
 
         let osm_info = osm_coords.and_then(|coords| osm_name.map(|name| (name, coords)));
 
-        let first_command = upd.message.as_ref().and_then(|m| m.get_entities_of_type(TgMessageEntityType::BotCommand).next().map(|s| s.to_owned()));
+        let first_command = upd.message.as_ref().and_then(|m| m.get_entities_of_type(TgMessageEntityType::BotCommand).next());
         match (first_command, osm_info, upd) {
             (None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {

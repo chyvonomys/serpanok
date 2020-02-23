@@ -227,10 +227,7 @@ fn make_avail_grid_fut(
 
     let res = std::fs::File::open(&path)
         .map_err(|e| format!("file open failed: {}", e))
-        .map(|_| {
-            log.add_line("cache hit!");
-            ()
-        });
+        .map(|_| log.add_line("cache hit!"));
 
     let fut = future::ready(res) // TODO:
         .or_else(move |e: String| {

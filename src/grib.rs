@@ -405,9 +405,9 @@ pub fn decode_original_values(msg: &GribMessage) -> Result<Vec<f32>, String> {
             let hs = x2s.iter()
                 .zip(x1rle.iter().flat_map(|(n, v)| std::iter::repeat(v).take(*n)))
                 .map(|(x1, x2)| *x1 + *x2);
-
+            
             let (mut fs, _, _) = hs.skip(2).fold(
-                (vec![*h1 as f32, *h2 as f32], *h1 as i32, *h2 as i32),
+                (vec![*h1 as f32, *h2 as f32], *h2 as i32, *h1 as i32),
                 |(mut vec, f_, f__), h| {
                     let f = h as i32 + 2 * f_ - f__ + *hmin;
                     vec.push(f as f32);
@@ -440,10 +440,10 @@ impl fmt::Debug for Section7 {
             CodedValues::RawJpeg2000(v) => format!("Jpeg2000 {} bytes", v.len()),
             CodedValues::Simple16Bit(v) => format!("{} 16bit values", v.len()),
             CodedValues::ComplexSpatialDiff{ h1, h2, hmin, x1rle, x2s } => format!(
-                "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} pairs, {:?}\nX2={} data points, {:?}",
+                "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} pairs:\n{:?}...\n...{:?}\nX2={} data points:\n{:?}...\n...{:?}",
                 h1, h2, hmin,
-                x1rle.len(), &x1rle[..std::cmp::min(10, x1rle.len())],
-                x2s.len(), &x2s[..std::cmp::min(10, x2s.len())]
+                x1rle.len(), &x1rle[..std::cmp::min(10, x1rle.len())], &x1rle[std::cmp::max(0, x1rle.len() - 10)..],
+                x2s.len(), &x2s[..std::cmp::min(10, x2s.len())], &x2s[std::cmp::max(0, x2s.len() - 10)..]
             ),
         })
     }
@@ -497,16 +497,16 @@ named_args!(parse_section7_template3(
     x1rle: value!(ls.iter().zip(x1s.iter()).map(|(l, v)| (*l as usize, *v)).collect::<Vec<_>>()) >>
     groups: value!(ls.iter().zip(ws.iter()).map(|(l, w)| (*l, *w))) >> 
     verify!(value!({
-        let total = ls.iter().fold(0, |acc, x| acc + x);
-        let x2len = ls.iter().zip(ws.iter()).map(|(a, b)| a * b).fold(0, |acc, x| acc + x);
-        let wsmin = ws.iter().min().map(|x| *x);
-        let wsmax = ws.iter().max().map(|x| *x);
-        let lsmin = ls.iter().min().map(|x| *x);
-        let lsmax = ls.iter().max().map(|x| *x);
+        let total = ls.iter().sum();
+        let x2len: u32 = ls.iter().zip(ws.iter()).map(|(a, b)| a * b).sum();
+        let wsmin = ws.iter().min().copied();
+        let wsmax = ws.iter().max().copied();
+        let lsmin = ls.iter().min().copied();
+        let lsmax = ls.iter().max().copied();
         println!(
             "ws min:{:?} max:{:?}\nls: min:{:?} max:{:?}\nitems_calc={}\nitems={}\nl={}, ng={}, rem={}, x2len={}bits, ({}bytes +{}bits)",
             wsmin, wsmax, lsmin, lsmax, total, nvalues, length, ng, nn, x2len, x2len/8, x2len%8);
-        (total, ls.last().map(|x| *x).unwrap_or(0))
+        (total, ls.last().copied().unwrap_or(0))
     }), |x: (u32, u32)| x.0 == nvalues && x.1 == last_group_length) >>
     x2s: bits!(apply!(parse_bit_groups, groups)) >>
 

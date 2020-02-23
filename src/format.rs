@@ -74,7 +74,7 @@ use crate::data;
 pub struct ForecastText(pub String);
 
 pub fn format_place_link(name: &Option<String>, lat: f32, lon: f32) -> String {
-    let text = name.clone().unwrap_or(format_lat_lon(lat, lon));
+    let text = name.clone().unwrap_or_else(|| format_lat_lon(lat, lon));
     format!("[{}](http://www.openstreetmap.org/?mlat={}&mlon={})", text, lat, lon)
 }
 

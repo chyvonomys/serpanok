@@ -1,26 +1,8 @@
-use super::{Parameter, FileKey, DataFile, DataSource, TaggedLog};
+use super::{SourceParameter, FileKey, DataFile, TaggedLog};
 use super::{fetch_url, avail_url, unpack_bzip2};
 use crate::grib;
 use futures::{Future, TryFutureExt};
-
-pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
-    let common = g.section4.product_def.common();
-    match (param, common.parameter_cat, common.parameter_num) {
-        (Parameter::Temperature2m, 0, 0) => true, // Temperature/Temperature(K)
-        (Parameter::TotalCloudCover, 6, 1) => true, // Cloud/TotalCloudCover(%)
-        (Parameter::WindSpeedU10m, 2, 2) => true, // Momentum/WindSpeedUComp(m/s)
-        (Parameter::WindSpeedV10m, 2, 3) => true, // Momentum/WindSpeedVComp(m/s)
-        (Parameter::TotalAccumPrecip, 1, 52) => true, // Moisture/TotalPrecipitationRate(kg/m2/s)
-        (Parameter::ConvectiveSnow, 1, 55) => true, // Moisture/ConvectiveSnowfallRateWaterEquiv(kg/m2/s)
-        (Parameter::LargeScaleSnow, 1, 56) => true, // Moisture/LargeScaleSnowfallRateWaterEquiv(kg/m2/s)
-        (Parameter::ConvectiveRain, 1, 76) => true, // Moisture/ConvectiveRainRate(kg/m2/s)
-        (Parameter::LargeScaleRain, 1, 77) => true, // Moisture/LargeScaleRainRate(kg/m2/s)
-        (Parameter::SnowDepth, 1, 11) => true, // Moisture/SnowDepth(m)
-        (Parameter::PressureMSL, 3, 1) => true, // Mass/PressureReducedToMSL(Pa)
-        (Parameter::RelHumidity2m, 1, 1) => true, // Moisture/RelativeHumidity(%)
-        _ => false
-    }
-}
+use serde_derive::Serialize;
 
 pub fn covers_point(lat: f32, lon: f32) -> bool {
     lat >= 29.5 && lat <= 70.5 && lon >= -23.5 && lon <= 45.0
@@ -55,22 +37,11 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
         let omr = cs.get(4).and_then(|x| x.as_str().parse::<u8>().ok());
         let ots = cs.get(5).and_then(|x| x.as_str().parse::<u16>().ok());
         let op = cs.get(6).map(|x| x.as_str());
-        if let (Some(yyyy), Some(mm), Some(dd), Some(modelrun), Some(timestep), Some(p)) = (oyyyy, omm, odd, omr, ots, op) {
-            match p {
-                "T_2M"     => Some(Parameter::Temperature2m),
-                "U_10M"    => Some(Parameter::WindSpeedU10m),
-                "V_10M"    => Some(Parameter::WindSpeedV10m),
-                "CLCT"     => Some(Parameter::TotalCloudCover),
-                "TOT_PREC" => Some(Parameter::TotalAccumPrecip),
-                "SNOW_CON" => Some(Parameter::ConvectiveSnow),
-                "RAIN_CON" => Some(Parameter::ConvectiveRain),
-                "SNOW_GSP" => Some(Parameter::LargeScaleSnow),
-                "RAIN_GSP" => Some(Parameter::LargeScaleRain),
-                "H_SNOW"   => Some(Parameter::SnowDepth),
-                "PMSL"     => Some(Parameter::PressureMSL),
-                "RELHUM_2M"=> Some(Parameter::RelHumidity2m),
-                _ => None
-            }.map(move |param| FileKey{ source: DataSource::IconEu, yyyy, mm, dd, modelrun, timestep, param })
+        if let (Some(yyyy), Some(mm), Some(dd), Some(modelrun), Some(timestep), Some(abbrev)) = (oyyyy, omm, odd, omr, ots, op) {
+            IconParameter::from_str(abbrev).map(move |param| FileKey {
+                param: SourceParameter::IconEu(param),
+                yyyy, mm, dd, modelrun, timestep, 
+            })
         } else {
             None
         }
@@ -84,29 +55,18 @@ pub struct IconFile {
 }
 
 impl IconFile {
-    pub fn new(key: &FileKey) -> Self {
+    pub fn new(param: IconParameter, yyyy: u16, mm: u8, dd: u8, modelrun: u8, timestep: u16) -> Self {
 
-        let paramstr = match key.param {
-            Parameter::Temperature2m => "T_2M",
-            Parameter::WindSpeedU10m => "U_10M",
-            Parameter::WindSpeedV10m => "V_10M",
-            Parameter::TotalCloudCover => "CLCT",
-            Parameter::TotalAccumPrecip => "TOT_PREC",
-            Parameter::ConvectiveSnow => "SNOW_CON",
-            Parameter::ConvectiveRain => "RAIN_CON",
-            Parameter::LargeScaleSnow => "SNOW_GSP",
-            Parameter::LargeScaleRain => "RAIN_GSP",
-            Parameter::SnowDepth => "H_SNOW",
-            Parameter::PressureMSL => "PMSL",
-            Parameter::RelHumidity2m => "RELHUM_2M",
-        };
+        use chrono::offset::TimeZone;
 
-        let yyyymmdd = format!("{}{:02}{:02}", key.yyyy, key.mm, key.dd);
+        let paramstr = param.to_abbrev();
+        let yyyymmdd = format!("{}{:02}{:02}", yyyy, mm, dd);
+        let modelrun_time = chrono::Utc.ymd(yyyy.into(), mm.into(), dd.into()).and_hms(modelrun.into(), 0, 0);
 
         Self {        
-            prefix: format!("https://opendata.dwd.de/weather/nwp/icon-eu/grib/{:02}/{}/", key.modelrun, paramstr.to_lowercase()),
-            filename: format!("icon-eu_europe_regular-lat-lon_single-level_{}{:02}_{:03}_{}.grib2", yyyymmdd, key.modelrun, key.timestep, paramstr),
-            modelrun_time: key.get_modelrun_tm(),
+            prefix: format!("https://opendata.dwd.de/weather/nwp/icon-eu/grib/{:02}/{}/", modelrun, paramstr.to_lowercase()),
+            filename: format!("icon-eu_europe_regular-lat-lon_single-level_{}{:02}_{:03}_{}.grib2", yyyymmdd, modelrun, timestep, paramstr),
+            modelrun_time
         }
     }
 }
@@ -132,5 +92,78 @@ impl DataFile for IconFile {
 
     fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
         Box::new( avail_url(log, format!("{}{}.bz2", self.prefix, self.filename)) )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum IconParameter {
+    Temperature2m,
+    WindSpeedU10m,
+    WindSpeedV10m,
+    TotalCloudCover,
+    TotalAccumPrecip,
+    ConvectiveSnow,
+    ConvectiveRain,
+    LargeScaleSnow,
+    LargeScaleRain,
+    SnowDepth,
+    PressureMSL,
+    RelHumidity2m,
+}
+
+impl IconParameter {
+    fn to_abbrev(self) -> &'static str {
+        match self {
+            IconParameter::Temperature2m    => "T_2M",
+            IconParameter::WindSpeedU10m    => "U_10M",
+            IconParameter::WindSpeedV10m    => "V_10M",
+            IconParameter::TotalCloudCover  => "CLCT",
+            IconParameter::TotalAccumPrecip => "TOT_PREC",
+            IconParameter::ConvectiveSnow   => "SNOW_CON",
+            IconParameter::ConvectiveRain   => "RAIN_CON",
+            IconParameter::LargeScaleSnow   => "SNOW_GSP",
+            IconParameter::LargeScaleRain   => "RAIN_GSP",
+            IconParameter::SnowDepth        => "H_SNOW",
+            IconParameter::PressureMSL      => "PMSL",
+            IconParameter::RelHumidity2m    => "RELHUM_2M",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "T_2M"     => Some(IconParameter::Temperature2m),
+            "U_10M"    => Some(IconParameter::WindSpeedU10m),
+            "V_10M"    => Some(IconParameter::WindSpeedV10m),
+            "CLCT"     => Some(IconParameter::TotalCloudCover),
+            "TOT_PREC" => Some(IconParameter::TotalAccumPrecip),
+            "SNOW_CON" => Some(IconParameter::ConvectiveSnow),
+            "RAIN_CON" => Some(IconParameter::ConvectiveRain),
+            "SNOW_GSP" => Some(IconParameter::LargeScaleSnow),
+            "RAIN_GSP" => Some(IconParameter::LargeScaleRain),
+            "H_SNOW"   => Some(IconParameter::SnowDepth),
+            "PMSL"     => Some(IconParameter::PressureMSL),
+            "RELHUM_2M"=> Some(IconParameter::RelHumidity2m),
+            _ => None
+        }
+    }
+
+    // TODO: add level to verification
+    pub fn verify_grib2(self, g: &grib::GribMessage) -> bool {
+        let common = g.section4.product_def.common();
+        match (self, common.parameter_cat, common.parameter_num) {
+            (IconParameter::Temperature2m,    0, 0)  => true, // Temperature/Temperature(K)
+            (IconParameter::TotalCloudCover,  6, 1)  => true, // Cloud/TotalCloudCover(%)
+            (IconParameter::WindSpeedU10m,    2, 2)  => true, // Momentum/WindSpeedUComp(m/s)
+            (IconParameter::WindSpeedV10m,    2, 3)  => true, // Momentum/WindSpeedVComp(m/s)
+            (IconParameter::TotalAccumPrecip, 1, 52) => true, // Moisture/TotalPrecipitationRate(kg/m2/s)
+            (IconParameter::ConvectiveSnow,   1, 55) => true, // Moisture/ConvectiveSnowfallRateWaterEquiv(kg/m2/s)
+            (IconParameter::LargeScaleSnow,   1, 56) => true, // Moisture/LargeScaleSnowfallRateWaterEquiv(kg/m2/s)
+            (IconParameter::ConvectiveRain,   1, 76) => true, // Moisture/ConvectiveRainRate(kg/m2/s)
+            (IconParameter::LargeScaleRain,   1, 77) => true, // Moisture/LargeScaleRainRate(kg/m2/s)
+            (IconParameter::SnowDepth,        1, 11) => true, // Moisture/SnowDepth(m)
+            (IconParameter::PressureMSL,      3, 1)  => true, // Mass/PressureReducedToMSL(Pa)
+            (IconParameter::RelHumidity2m,    1, 1)  => true, // Moisture/RelativeHumidity(%)
+            _ => false
+        }
     }
 }

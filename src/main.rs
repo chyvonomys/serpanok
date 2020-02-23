@@ -6,19 +6,31 @@ use lazy_static::*;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum Parameter {
+pub enum TargetParameter {
     Temperature2m,
     TotalCloudCover,
     WindSpeedU10m,
     WindSpeedV10m,
-    TotalAccumPrecip,
-    ConvectiveSnow,
-    LargeScaleSnow,
-    ConvectiveRain,
-    LargeScaleRain,
+    SnowPrecipRate,
+    RainPrecipRate,
     SnowDepth,
     PressureMSL,
     RelHumidity2m,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+enum SourceParameter {
+    IconEu(icon::IconParameter),
+    Gfs(gfs::GfsParameter, gfs::GfsResolution),
+}
+
+impl SourceParameter {
+    fn verify_grib2(self, grib2: &grib::GribMessage) -> bool {
+        match self {
+            SourceParameter::IconEu(icon_param) => icon_param.verify_grib2(grib2),
+            SourceParameter::Gfs(gfs_param, res) => gfs_param.verify_grib2(grib2),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -48,31 +60,40 @@ impl DataSource {
         }
     }
 
-    fn covers_point(&self, lat: f32, lon: f32) -> bool {
+    fn covers_point(self, lat: f32, lon: f32) -> bool {
         match self {
             DataSource::IconEu => icon::covers_point(lat, lon),
-            DataSource::Gfs(res) => gfs::covers_point(*res, lat, lon),
+            DataSource::Gfs(res) => gfs::covers_point(res, lat, lon),
         }
     }
-    fn modelrun_iter(&self) -> impl Iterator<Item=u8> {
+    fn modelrun_iter(self) -> impl Iterator<Item=u8> {
         match self {
             DataSource::IconEu => either::Either::Left( icon::modelrun_iter() ),
             DataSource::Gfs(_) => either::Either::Right( gfs::modelrun_iter() ),
         }
     }
-    fn timestep_iter(&self, mr: u8) -> impl Iterator<Item=u16> {
+    fn timestep_iter(self, mr: u8) -> impl Iterator<Item=u16> {
         match self {
             DataSource::IconEu => either::Either::Left( icon::timestep_iter(mr) ),
-            DataSource::Gfs(res) => either::Either::Right( gfs::timestep_iter(*res) ),
+            DataSource::Gfs(res) => either::Either::Right( gfs::timestep_iter(res) ),
         }
     }
 
     fn avail_all(
-        &self, log: Arc<TaggedLog>, timespec: data::ForecastTimeSpec, params: data::ParameterFlags
+        self, log: Arc<TaggedLog>, timespec: data::ForecastTimeSpec, params: data::ParameterFlags
     ) -> impl Future<Output=Result<(), String>> {
         match self {
             DataSource::IconEu => data::icon_avail_all(log, timespec, params).left_future(),
-            DataSource::Gfs(res) => data::gfs_avail_all(*res, log, timespec).right_future(),
+            DataSource::Gfs(res) => data::gfs_avail_all(res, log, timespec).right_future(),
+        }
+    }
+
+    fn fetch_all(
+        self, log: Arc<TaggedLog>, lat: f32, lon: f32, timespec: data::ForecastTimeSpec, params: data::ParameterFlags
+    ) -> impl Future<Output=Result<data::Forecast, String>> {
+        match self {
+            DataSource::IconEu => data::icon_fetch_all(log, lat, lon, timespec, params).left_future(),
+            DataSource::Gfs(res) => data::gfs_fetch_all(log, lat, lon, timespec, params, res).right_future(),
         }
     }
 }
@@ -90,8 +111,7 @@ impl std::fmt::Display for DataSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct FileKey {
-    source: DataSource,
-    param: Parameter,
+    param: SourceParameter,
     yyyy: u16,
     mm: u8,
     dd: u8,
@@ -103,8 +123,7 @@ impl FileKey {
     #[cfg(test)]
     fn test_new() -> Self {
         Self {
-            source: DataSource::IconEu,
-            param: Parameter::Temperature2m,
+            param: SourceParameter::Gfs(gfs::GfsParameter::Temperature2m, gfs::GfsResolution::Deg050),
             yyyy: 2018,
             mm: 11,
             dd: 24,
@@ -113,9 +132,9 @@ impl FileKey {
         }
     }
 
-    fn new(source: DataSource, param: Parameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u16) -> Self {
+    fn new(param: SourceParameter, dt: chrono::Date<chrono::Utc>, modelrun: u8, timestep: u16) -> Self {
         Self {
-            source, param,
+            param,
             yyyy: dt.year() as u16,
             mm: dt.month() as u8,
             dd: dt.day() as u8,
@@ -129,9 +148,13 @@ impl FileKey {
     }
 
     fn build_data_file(&self) -> Box<dyn DataFile> {
-        match self.source { // TODO: filekey contains datasource
-            DataSource::IconEu => Box::new(icon::IconFile::new(&self)),
-            DataSource::Gfs(res) => Box::new(gfs::GfsFile::new(&self, res)),
+        match self.param {
+            SourceParameter::IconEu(icon_param) => Box::new(icon::IconFile::new(
+                icon_param, self.yyyy, self.mm, self.dd, self.modelrun, self.timestep
+            )),
+            SourceParameter::Gfs(gfs_param, res) => Box::new(gfs::GfsFile::new(
+                gfs_param, res, self.yyyy, self.mm, self.dd, self.modelrun, self.timestep
+            )),
         }
     }
 }
@@ -535,7 +558,7 @@ fn forward_updates(url: String, interval: u64) -> impl Future<Output=()> {
                 })
         )
         .map_ok(|_| ())
-        .map_err(|e| println!("poll stream error: {}", e.to_string()))
+        .map_err(|e| println!("poll stream error: {}", e))
         .map(|_| ())
 }
 
@@ -572,7 +595,7 @@ fn main() {
     std::env::set_var("BOTTOKEN", clmatches.value_of("bot_token").unwrap());
     let bind_addr = clmatches.value_of("bind_addr")
         .and_then(|s| std::net::SocketAddr::from_str(s).ok())
-        .unwrap_or(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8778));
+        .unwrap_or_else(|| std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8778));
     let poll_mode = clmatches.is_present("poll_mode");
     let poll_int = clmatches.value_of("poll_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(2);
     let mem_int = clmatches.value_of("mem_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(60);
