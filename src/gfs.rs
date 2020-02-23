@@ -1,6 +1,7 @@
 use nom::{named, do_parse, call, tag, recognize, take_until, map_res, many0, complete, digit};
 use super::{FileKey, DataFile, DataSource, TaggedLog, Parameter, fetch_url, avail_url};
 use futures::{Future, FutureExt, TryFutureExt};
+use serde_derive::{Serialize, Deserialize};
 
 #[test]
 fn test_parse_inventory() {
@@ -23,8 +24,8 @@ fn test_gfs_fetch() {
     use crate::grib;
     use crate::data;
     use futures::{future, stream, StreamExt, TryStreamExt};
-    let s = stream::iter(vec![DataSource::Gfs100, DataSource::Gfs050].into_iter()).then(|ds| {
-        let key = FileKey::new(ds, Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 3);
+    let s = stream::iter(vec![GfsResolution::Deg100, GfsResolution::Deg050].into_iter()).then(|res| {
+        let key = FileKey::new(DataSource::Gfs(res), Parameter::Temperature2m, chrono::Utc::today().pred(), 0, 3);
         let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
         let f = cache::make_fetch_grid_fut(log, key)
             .inspect_ok(|msg| println!("{:#?}", msg))
@@ -89,6 +90,7 @@ fn parse_inventory(index: &str) -> Result<Vec<InventoryItem>, String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GfsResolution {
     Deg025, Deg050, Deg100
 }
@@ -125,11 +127,11 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
             }
             .and_then(|param|
                 match res {
-                    "0p25" => Some(DataSource::Gfs025),
-                    "0p50" => Some(DataSource::Gfs050),
-                    "1p00" => Some(DataSource::Gfs100),
+                    "0p25" => Some(GfsResolution::Deg025),
+                    "0p50" => Some(GfsResolution::Deg050),
+                    "1p00" => Some(GfsResolution::Deg100),
                     _ => None
-                }.map(|ds| (ds, param))
+                }.map(|res| (DataSource::Gfs(res), param))
             )
             .map(move |(source, param)| FileKey{ source, yyyy, mm, dd, modelrun, timestep, param })
         } else {
@@ -138,12 +140,36 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
     })
 }
 
+pub fn covers_point(res: GfsResolution, lat: f32, lon: f32) -> bool {
+    lat >= -90.0 && lat <= 90.0 && lon >= 0.0 && lon <= match res {
+        GfsResolution::Deg025 => 359.75,
+        GfsResolution::Deg050 => 359.5,
+        GfsResolution::Deg100 => 359.0,
+    }
+}
+
+pub fn timestep_iter(res: GfsResolution) -> impl Iterator<Item=u16> {
+    match res {
+        GfsResolution::Deg025 => Iterator::chain(
+            0u16..120,
+            (120..=384).step_by(3)
+        ),
+        _ => Iterator::chain(
+            0u16..0,
+            (0..=384).step_by(3)
+        ),
+    }
+}
+
+pub fn modelrun_iter() -> impl Iterator<Item=u8> {
+    (0u8..=18).step_by(6)
+}
+
 pub struct GfsFile {
     url: String,
     filename: String,
     abbrev: String,
     level: String,
-    res: GfsResolution,
 }
 
 impl GfsFile {
@@ -160,29 +186,7 @@ impl GfsFile {
             ),
             abbrev: "TMP".to_owned(),
             level: "2 m above ground".to_owned(),
-            res,
         }
-    }
-
-    pub fn timestep_iter(&self, _mr: u8) -> impl Iterator<Item=u16> {
-        match self.res {
-            GfsResolution::Deg025 => Iterator::chain(
-                0u16..120,
-                (120..=384).step_by(3)
-            ),
-            _ => Iterator::chain(
-                0u16..0,
-                (0..=384).step_by(3)
-            ),
-        }
-    }
-    
-    pub fn modelrun_iter(&self) -> impl Iterator<Item=u8> {
-        (0u8..=18).step_by(6)
-    }
-
-    pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
-        avail_url(log, format!("{}.idx", self.url))
     }
 }
 
@@ -226,5 +230,9 @@ impl DataFile for GfsFile {
 
     fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc::now() + chrono::Duration::hours(1) // TODO:
+    }
+
+    fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
+        Box::new( avail_url(log, format!("{}.idx", self.url)) )
     }
 }

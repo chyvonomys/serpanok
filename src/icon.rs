@@ -22,8 +22,11 @@ pub fn icon_verify_parameter(param: Parameter, g: &grib::GribMessage) -> bool {
     }
 }
 
+pub fn covers_point(lat: f32, lon: f32) -> bool {
+    lat >= 29.5 && lat <= 70.5 && lon >= -23.5 && lon <= 45.0
+}
 
-pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u16> {
+pub fn timestep_iter(mr: u8) -> impl Iterator<Item=u16> {
     if mr % 6 == 0 {
         either::Either::Left(Iterator::chain(
             0u16..78,
@@ -34,7 +37,7 @@ pub fn icon_timestep_iter(mr: u8) -> impl Iterator<Item=u16> {
     }
 }
 
-pub fn icon_modelrun_iter() -> impl Iterator<Item=u8> {
+pub fn modelrun_iter() -> impl Iterator<Item=u8> {
     (0u8..=21).step_by(3)
 }
 
@@ -106,12 +109,6 @@ impl IconFile {
             modelrun_time: key.get_modelrun_tm(),
         }
     }
-
-
-    pub fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> impl Future<Output=Result<(), String>> {
-        avail_url(log, format!("{}{}.bz2", self.prefix, self.filename))
-    }
-
 }
 
 impl DataFile for IconFile {
@@ -131,5 +128,9 @@ impl DataFile for IconFile {
 
     fn available_to(&self) -> chrono::DateTime<chrono::Utc> {
         self.modelrun_time + chrono::Duration::hours(26) + chrono::Duration::minutes(30)
+    }
+
+    fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
+        Box::new( avail_url(log, format!("{}{}.bz2", self.prefix, self.filename)) )
     }
 }

@@ -1,7 +1,7 @@
 use crate::telegram;
 use crate::format;
 use crate::data;
-use super::{TaggedLog, lookup_tz};
+use super::{TaggedLog, DataSource, lookup_tz};
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -27,13 +27,13 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
 
     let fts = match sub.mode {
         Mode::Daily(sendh, targeth) =>
-            data::daily_forecast_stream(log.clone(), sub.latitude, sub.longitude, sendh, targeth, tz, sub.params)
+            data::daily_forecast_stream(log.clone(), sub.latitude, sub.longitude, sendh, targeth, tz, sub.source, sub.params)
                 .boxed(),
         Mode::Once(target_time) =>
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.source, sub.params)
                 .take(1).boxed(),
         Mode::Live(target_time) =>
-            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.params)
+            data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.source, sub.params)
                 .take(1000).boxed(),
         Mode::Debug(n, d) =>
             tokio::time::interval_at(
@@ -108,6 +108,7 @@ pub struct Sub {
     pub longitude: f32,
     name: Option<String>, // name for place/none if coords
     mode: Mode,
+    source: DataSource,
     params: data::ParameterFlags,
 }
 
@@ -643,7 +644,7 @@ fn config_screen(
         )
 }
 
-fn process_widget(chat_id: i64, lat: f32, lon: f32, name: Option<String>) -> impl Future<Output=Result<(), String>> {
+fn process_widget(chat_id: i64, lat: f32, lon: f32, source: DataSource, name: Option<String>) -> impl Future<Output=Result<(), String>> {
 
     let state = WidgetState {
         lat, lon, name, tz: lookup_tz(lat, lon), params: data::ParameterFlags::default()
@@ -665,7 +666,7 @@ fn process_widget(chat_id: i64, lat: f32, lon: f32, name: Option<String>) -> imp
                             widget_message_id: widget_msg_id,
                             latitude: state.lat,
                             longitude: state.lon,
-                            mode, params: state.params,
+                            mode, source, params: state.params,
                         };
                         monitor_weather_wrap(sub, state.tz)
                     }),
@@ -694,7 +695,7 @@ static USAGE_MSG: &str = "\u{1F4A1} цей бот вміє відстежува�
 `     `(меню \u{1F4CE} в мобільному додатку)\n\
 \u{1F5FA} *по назві місця*\n\
 `     `(ввести `@osmbot <назва>` і вибрати з списку)";
-static WRONG_LOCATION_MSG: &str = "я можу відстежувати тільки європейську погоду";
+static WRONG_LOCATION_MSG: &str = "невірні координати місця";
 static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
 static CBQ_ERROR_MSG: &str = "помилка";
 static PADDING_BTN_MSG: &str = "недоcтупна опція";
@@ -712,12 +713,12 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
                     "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
-                    "/debug" => Box::new(process_widget(chat_id, 50.62, 26.25, Some("debug-rv".to_owned()))),
+                    "/debug" => Box::new(process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned()))),
                     _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
                 },
             SeUpdateVariant::Place {latitude, longitude, name, ..} =>
-                if latitude > 29.5 && latitude < 70.5 && longitude > -23.5 && longitude < 45.0 {
-                    Box::new(process_widget(chat_id, latitude, longitude, name))
+                if let Some(source) = DataSource::from_latlon(latitude, longitude) {
+                    Box::new(process_widget(chat_id, latitude, longitude, source, name))
                 } else {
                     Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
                 }

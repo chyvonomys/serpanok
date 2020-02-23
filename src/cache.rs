@@ -220,8 +220,8 @@ fn download_grid_fut(
 fn make_avail_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
 ) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
-    let icon_file = Arc::new(icon::IconFile::new(&file_key));
-    let path = icon_file.cache_filename().to_owned();
+    let data_file = file_key.build_data_file();
+    let path = data_file.cache_filename().to_owned();
 
     log.add_line(&format!("avail grid: {}...", &path));
 
@@ -236,7 +236,7 @@ fn make_avail_grid_fut(
         .or_else(move |e: String| {
             let log = log.clone();
             log.add_line(&format!("cache miss: {}", &e));
-            icon_file.check_avail(log)
+            data_file.check_avail(log)
         });
 
     Box::new(fut)

@@ -1,37 +1,51 @@
 use super::{Parameter, FileKey, DataSource, TaggedLog, DebugRFC3339};
 use crate::cache;
 use crate::icon; // TODO:
+use crate::gfs;
 use crate::grib;
 use std::sync::Arc;
 use chrono::{Timelike, TimeZone};
 use futures::{stream, Stream, StreamExt, TryStreamExt, future, Future, FutureExt, TryFutureExt};
 use itertools::Itertools; // tuple_windows, collect_vec
 
-pub fn forecast_iterator<MR, TS, TSI, MRI, MRIF, TSIF>(
-    start_time: chrono::DateTime<chrono::Utc>, target_time: chrono::DateTime<chrono::Utc>, mri: MRIF, tsi: TSIF
-) -> impl Iterator<Item=(chrono::DateTime<chrono::Utc>, MR, chrono::DateTime<chrono::Utc>, TS, chrono::DateTime<chrono::Utc>, TS)>
-where
-    MR: Into<i64> + Clone,
-    TS: Into<i64> + Clone,
-    TSI: Iterator<Item=TS>,
-    MRI: Iterator<Item=MR>,
-    MRIF: Fn() -> MRI,
-    TSIF: Fn(MR) -> TSI,
-{
+pub struct ForecastTimeSpec {
+    modelrun_time: chrono::DateTime<chrono::Utc>,
+    modelrun: u8,
+    timestep0_time: chrono::DateTime<chrono::Utc>,
+    timestep0: u16,
+    timestep1_time: chrono::DateTime<chrono::Utc>,
+    timestep1: u16,
+}
+
+impl std::fmt::Display for ForecastTimeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f, "{}/{:02} >> {}/{:03} .. {}/{:03}",
+            self.modelrun_time.to_rfc3339_debug(), self.modelrun,
+            self.timestep0_time.to_rfc3339_debug(), self.timestep0,
+            self.timestep1_time.to_rfc3339_debug(), self.timestep1,
+        )
+    }
+}
+
+pub fn forecast_iterator(
+    start_time: chrono::DateTime<chrono::Utc>, target_time: chrono::DateTime<chrono::Utc>, source: DataSource
+) -> impl Iterator<Item=ForecastTimeSpec> {
+
     let start_time_d = start_time.date().and_hms(0, 0, 0); // trunc to days
     let start_time_h = start_time.date().and_hms(start_time.hour(), 0, 0); // trunc to hours
 
     (0..)
-        .flat_map(move |day| mri().map(
-            move |hh| (start_time_d + chrono::Duration::hours(day * 24 + hh.clone().into()), hh)
+        .flat_map(move |day| source.modelrun_iter().map(
+            move |hh| (start_time_d + chrono::Duration::hours(day as i64 * 24 + hh as i64), hh)
         ))
         .tuple_windows::<(_, _)>()
         .skip_while(move |(_, t)| t.0 <= start_time_h)
         .map(|(f, _)| f)
         .take_while(move |(hhtime, _)| target_time >= *hhtime)
         .map(move |(hhtime, hh)| {
-            let opt = tsi(hh.clone())
-             .map(|ts| (hhtime + chrono::Duration::hours(ts.clone().into()), ts))
+            let opt = source.timestep_iter(hh)
+             .map(|ts| (hhtime + chrono::Duration::hours(ts.into()), ts))
              .tuple_windows::<(_, _)>()
              .take_while(|(f, _)| target_time >= f.0)
              .skip_while(|(_, t)| target_time >= t.0)
@@ -39,7 +53,11 @@ where
             (hhtime, hh, opt)
         })
         .filter_map(|(s, mr, o)| o.map(|(x0, x1)| (s, mr, x0, x1)))
-        .map(|(s, mr, ts, ts1)| (s, mr, ts.0, ts.1, ts1.0, ts1.1))
+        .map(|(modelrun_time, modelrun, (timestep0_time, timestep0), (timestep1_time, timestep1))| ForecastTimeSpec {
+            modelrun_time, modelrun,
+            timestep0_time, timestep0,
+            timestep1_time, timestep1,
+        })
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -144,25 +162,26 @@ fn extract_value_at(msg: &grib::GribMessage, lat: f32, lon: f32) -> Result<f32, 
 
 fn avail_value(
     log: Arc<TaggedLog>,
+    source: DataSource,
     param: Parameter,
-    _lat: f32, _lon: f32,
     modelrun: ModelrunSpec,
     timestep: u16,
 ) -> impl Future<Output=Result<(), String>> {
-    let file_key = FileKey::new(DataSource::IconEu, param, modelrun.0, modelrun.1, timestep);
+    let file_key = FileKey::new(source, param, modelrun.0, modelrun.1, timestep);
     cache::avail_grid(log, file_key)
         .map_err(|e| format!("avail_value error: {}", e))
 }
 
 fn fetch_value(
     log: Arc<TaggedLog>,
+    source: DataSource,
     param: Parameter,
     lat: f32, lon: f32,
     modelrun: ModelrunSpec,
     timestep: u16,
 ) -> impl Future<Output=Result<f32, String>> {
 
-    let file_key = FileKey::new(DataSource::IconEu, param, modelrun.0, modelrun.1, timestep);
+    let file_key = FileKey::new(source, param, modelrun.0, modelrun.1, timestep);
     cache::fetch_grid(log, file_key)
         .and_then(move |grid| {
             if icon::icon_verify_parameter(param, &grid) {
@@ -185,7 +204,6 @@ where FN: FnOnce() -> F, F: Future<Output=Result<I, String>> {
 }
 
 type ModelrunSpec = (chrono::Date<chrono::Utc>, u8);
-type TimestepSpec = (chrono::DateTime<chrono::Utc>, u16);
 
 use serde_derive::{Serialize, Deserialize};
 
@@ -199,6 +217,21 @@ pub struct ParameterFlags {
     pub depth: bool,
     pub pmsl: bool,
     pub relhum: bool,
+}
+
+impl ParameterFlags {
+    fn gfs() -> Self {
+        Self {
+            tcc: false,
+            wind: false,
+            precip: false,
+            rain: false,
+            snow: false,
+            depth: false,
+            pmsl: false,
+            relhum: false,
+        }
+    }
 }
 
 impl Default for ParameterFlags {
@@ -216,92 +249,108 @@ impl Default for ParameterFlags {
     }
 }
 
-fn avail_all(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, mr: ModelrunSpec, t0: TimestepSpec, t1: TimestepSpec, params: ParameterFlags
-) -> std::pin::Pin<Box<dyn Future<Output=Result<(), String>> + Send>> {
-
-    let log1 = log.clone();
-    let log2 = log.clone();
-    let log3 = log.clone();
-    let log4 = log.clone();
-    let log5 = log.clone();
-    let ts = t0.1;
-    let ts1 = t1.1;
-    let f = future::try_join4(
-        avail_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
-        future::try_join3(
-            opt_wrap(params.tcc, { let l = log.clone(); move || avail_value(l, Parameter::TotalCloudCover, lat, lon, mr, ts)}),
-            opt_wrap(params.relhum, { let l = log.clone(); move || avail_value(l, Parameter::RelHumidity2m, lat, lon, mr, ts)}),
-            opt_wrap(params.pmsl, move || avail_value(log1, Parameter::PressureMSL, lat, lon, mr, ts)),
-        ),
-        opt_wrap(params.wind, move || future::try_join(
-            avail_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
-            avail_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
-        )),
-        future::try_join4(
-            opt_wrap(params.precip, move || future::try_join(
-                avail_value(log3.clone(), Parameter::TotalAccumPrecip, lat, lon, mr, ts),
-                avail_value(log3, Parameter::TotalAccumPrecip, lat, lon, mr, ts1),
-            )),
-            opt_wrap(params.rain, move || future::try_join4(
-                avail_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts),
-                avail_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts1),
-                avail_value(log4.clone(), Parameter::ConvectiveRain, lat, lon, mr, ts),
-                avail_value(log4, Parameter::ConvectiveRain, lat, lon, mr, ts1),
-            )),
-            opt_wrap(params.snow, move || future::try_join4(
-                avail_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts),
-                avail_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts1),
-                avail_value(log5.clone(), Parameter::ConvectiveSnow, lat, lon, mr, ts),
-                avail_value(log5, Parameter::ConvectiveSnow, lat, lon, mr, ts1),
-            )),
-            opt_wrap(params.depth, move || avail_value(log, Parameter::SnowDepth, lat, lon, mr, ts)),
-        ),
-    )
-    .map_ok(move |_| ());
-    Box::pin(f)
+pub fn gfs_avail_all(
+    res: gfs::GfsResolution, log: Arc<TaggedLog>, timespec: ForecastTimeSpec
+) -> impl Future<Output=Result<(), String>> {
+    let mr = (timespec.modelrun_time.date(), timespec.modelrun);
+    let ts = timespec.timestep0;
+    let ts1 = timespec.timestep1;
+    // GFS has everything in one file, so checking one parameter is enough
+    future::try_join(
+        avail_value(log.clone(), DataSource::Gfs(res), Parameter::Temperature2m, mr, ts),
+        avail_value(log, DataSource::Gfs(res), Parameter::Temperature2m, mr, ts1)
+    ).map_ok(|_| ())
 }
 
-fn fetch_all(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, mr: ModelrunSpec, t0: TimestepSpec, t1: TimestepSpec, params: ParameterFlags
-) -> std::pin::Pin<Box<dyn Future<Output=Result<Forecast, String>> + Send>> {
+pub fn icon_avail_all(
+    log: Arc<TaggedLog>, timespec: ForecastTimeSpec, params: ParameterFlags
+) -> impl Future<Output=Result<(), String>> {
 
     let log1 = log.clone();
     let log2 = log.clone();
     let log3 = log.clone();
     let log4 = log.clone();
     let log5 = log.clone();
-    let ts = t0.1;
-    let ts1 = t1.1;
-    let f = future::try_join4(
-        fetch_value(log.clone(), Parameter::Temperature2m, lat, lon, mr, ts),
+    let mr = (timespec.modelrun_time.date(), timespec.modelrun);
+    let ts = timespec.timestep0;
+    let ts1 = timespec.timestep1;
+    future::try_join4(
+        avail_value(log.clone(), DataSource::IconEu, Parameter::Temperature2m, mr, ts),
         future::try_join3(
-            opt_wrap(params.tcc, { let l = log.clone(); move || fetch_value(l, Parameter::TotalCloudCover, lat, lon, mr, ts)}),
-            opt_wrap(params.relhum, { let l = log.clone(); move || fetch_value(l, Parameter::RelHumidity2m, lat, lon, mr, ts)}),
-            opt_wrap(params.pmsl, move || fetch_value(log1, Parameter::PressureMSL, lat, lon, mr, ts)),
+            opt_wrap(params.tcc, { let l = log.clone(); move || avail_value(l, DataSource::IconEu, Parameter::TotalCloudCover, mr, ts)}),
+            opt_wrap(params.relhum, { let l = log.clone(); move || avail_value(l, DataSource::IconEu, Parameter::RelHumidity2m, mr, ts)}),
+            opt_wrap(params.pmsl, move || avail_value(log1, DataSource::IconEu, Parameter::PressureMSL, mr, ts)),
         ),
         opt_wrap(params.wind, move || future::try_join(
-            fetch_value(log2.clone(), Parameter::WindSpeedU10m, lat, lon, mr, ts),
-            fetch_value(log2, Parameter::WindSpeedV10m, lat, lon, mr, ts),
+            avail_value(log2.clone(), DataSource::IconEu, Parameter::WindSpeedU10m, mr, ts),
+            avail_value(log2, DataSource::IconEu, Parameter::WindSpeedV10m, mr, ts),
         )),
         future::try_join4(
             opt_wrap(params.precip, move || future::try_join(
-                fetch_value(log3.clone(), Parameter::TotalAccumPrecip, lat, lon, mr, ts),
-                fetch_value(log3, Parameter::TotalAccumPrecip, lat, lon, mr, ts1),
+                avail_value(log3.clone(), DataSource::IconEu, Parameter::TotalAccumPrecip, mr, ts),
+                avail_value(log3, DataSource::IconEu, Parameter::TotalAccumPrecip, mr, ts1),
             )),
             opt_wrap(params.rain, move || future::try_join4(
-                fetch_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts),
-                fetch_value(log4.clone(), Parameter::LargeScaleRain, lat, lon, mr, ts1),
-                fetch_value(log4.clone(), Parameter::ConvectiveRain, lat, lon, mr, ts),
-                fetch_value(log4, Parameter::ConvectiveRain, lat, lon, mr, ts1),
+                avail_value(log4.clone(), DataSource::IconEu, Parameter::LargeScaleRain, mr, ts),
+                avail_value(log4.clone(), DataSource::IconEu, Parameter::LargeScaleRain, mr, ts1),
+                avail_value(log4.clone(), DataSource::IconEu, Parameter::ConvectiveRain, mr, ts),
+                avail_value(log4, DataSource::IconEu, Parameter::ConvectiveRain, mr, ts1),
             )),
             opt_wrap(params.snow, move || future::try_join4(
-                fetch_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts),
-                fetch_value(log5.clone(), Parameter::LargeScaleSnow, lat, lon, mr, ts1),
-                fetch_value(log5.clone(), Parameter::ConvectiveSnow, lat, lon, mr, ts),
-                fetch_value(log5, Parameter::ConvectiveSnow, lat, lon, mr, ts1),
+                avail_value(log5.clone(), DataSource::IconEu, Parameter::LargeScaleSnow, mr, ts),
+                avail_value(log5.clone(), DataSource::IconEu, Parameter::LargeScaleSnow, mr, ts1),
+                avail_value(log5.clone(), DataSource::IconEu, Parameter::ConvectiveSnow, mr, ts),
+                avail_value(log5, DataSource::IconEu, Parameter::ConvectiveSnow, mr, ts1),
             )),
-            opt_wrap(params.depth, move || fetch_value(log, Parameter::SnowDepth, lat, lon, mr, ts)),
+            opt_wrap(params.depth, move || avail_value(log, DataSource::IconEu, Parameter::SnowDepth, mr, ts)),
+        ),
+    ).map_ok(move |_| ())
+}
+
+pub fn fetch_all(
+    source: DataSource, log: Arc<TaggedLog>, lat: f32, lon: f32, timespec: ForecastTimeSpec, params: ParameterFlags
+) -> impl Future<Output=Result<Forecast, String>> {
+
+    // TODO;
+    let params = if let DataSource::Gfs(_) = source { ParameterFlags::gfs() } else { params };
+
+    let log1 = log.clone();
+    let log2 = log.clone();
+    let log3 = log.clone();
+    let log4 = log.clone();
+    let log5 = log.clone();
+    let mr = (timespec.modelrun_time.date(), timespec.modelrun);
+    let ts = timespec.timestep0;
+    let ts1 = timespec.timestep1;
+    future::try_join4(
+        fetch_value(log.clone(), source, Parameter::Temperature2m, lat, lon, mr, ts),
+        future::try_join3(
+            opt_wrap(params.tcc, { let l = log.clone(); move || fetch_value(l, source, Parameter::TotalCloudCover, lat, lon, mr, ts)}),
+            opt_wrap(params.relhum, { let l = log.clone(); move || fetch_value(l, source, Parameter::RelHumidity2m, lat, lon, mr, ts)}),
+            opt_wrap(params.pmsl, move || fetch_value(log1, source, Parameter::PressureMSL, lat, lon, mr, ts)),
+        ),
+        opt_wrap(params.wind, move || future::try_join(
+            fetch_value(log2.clone(), source, Parameter::WindSpeedU10m, lat, lon, mr, ts),
+            fetch_value(log2, source, Parameter::WindSpeedV10m, lat, lon, mr, ts),
+        )),
+        future::try_join4(
+            opt_wrap(params.precip, move || future::try_join(
+                fetch_value(log3.clone(), source, Parameter::TotalAccumPrecip, lat, lon, mr, ts),
+                fetch_value(log3, source, Parameter::TotalAccumPrecip, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.rain, move || future::try_join4(
+                fetch_value(log4.clone(), source, Parameter::LargeScaleRain, lat, lon, mr, ts),
+                fetch_value(log4.clone(), source, Parameter::LargeScaleRain, lat, lon, mr, ts1),
+                fetch_value(log4.clone(), source, Parameter::ConvectiveRain, lat, lon, mr, ts),
+                fetch_value(log4, source, Parameter::ConvectiveRain, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.snow, move || future::try_join4(
+                fetch_value(log5.clone(), source, Parameter::LargeScaleSnow, lat, lon, mr, ts),
+                fetch_value(log5.clone(), source, Parameter::LargeScaleSnow, lat, lon, mr, ts1),
+                fetch_value(log5.clone(), source, Parameter::ConvectiveSnow, lat, lon, mr, ts),
+                fetch_value(log5, source, Parameter::ConvectiveSnow, lat, lon, mr, ts1),
+            )),
+            opt_wrap(params.depth, move || fetch_value(log, source, Parameter::SnowDepth, lat, lon, mr, ts)),
         ),
     )
     .map_ok(move |(t, (otcc, orhum, opmsl), owind, (oprecip, orain, osnow, odepth))| Forecast {
@@ -314,32 +363,31 @@ fn fetch_all(
         rain_accum: orain.map(|(ls0, ls1, c0, c1)| (ls0 + c0, ls1 + c1)),
         snow_accum: osnow.map(|(ls0, ls1, c0, c1)| (ls0 + c0, ls1 + c1)),
         snow_depth: odepth,
-        time: (t0.0, t1.0),
-    });
-    Box::pin(f)
+        time: (timespec.timestep0_time, timespec.timestep1_time),
+    })
 }
 
 fn select_start_time<F, R>(
-    log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, try_func: F
+    log: Arc<TaggedLog>, target_time: chrono::DateTime<chrono::Utc>, source: DataSource, try_func: F
 ) -> impl Future<Output=Result<chrono::DateTime<chrono::Utc>, String>>
 where
-    F: Fn(Arc<TaggedLog>, chrono::DateTime<chrono::Utc>, u8, TimestepSpec, TimestepSpec) -> R,
+    F: Fn(Arc<TaggedLog>, ForecastTimeSpec) -> R,
     R: Future<Output=Result<(), String>> + Unpin,
 {
     let now = chrono::Utc::now();
     let start_time = now - chrono::Duration::hours(12);
-    let fs: Vec<_> = forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter).collect();
+    let fs: Vec<_> = forecast_iterator(start_time, target_time, source).collect();
 
     stream::unfold(fs, |mut fs| future::ready( fs.pop().map(|x| (x, fs)) ) )
-        .skip_while(move |(mrt, _, _, _, _, _)| {
-            let skip = now < *mrt;
-            println!("mrt={}, now={}, skip={}", mrt.to_rfc3339_debug(), now.to_rfc3339_debug(), skip);
+        .skip_while(move |ForecastTimeSpec {modelrun_time, ..}| {
+            let skip = now < *modelrun_time;
             future::ready(skip)
         })
-        .then(move |(mrt, mr, ft, ts, ft1, ts1)| {
-            log.add_line(&format!("try {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
+        .then(move |timespec| {
+            let mrt = timespec.modelrun_time;
+            log.add_line(&format!("try {} {}", source, timespec));
             let log = log.clone();
-            try_func(log.clone(), mrt, mr, (ft, ts), (ft1, ts1))
+            try_func(log.clone(), timespec)
                 .then(move |v: Result<(), String>| {
                     let res = match v {
                         Ok( () ) => Some(mrt),
@@ -367,18 +415,18 @@ pub struct Forecast {
 }
 
 pub fn forecast_stream(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>, params: ParameterFlags
+    log: Arc<TaggedLog>, lat: f32, lon: f32, target_time: chrono::DateTime<chrono::Utc>, source: DataSource, params: ParameterFlags
 ) -> impl Stream<Item=Result<Forecast, String>> {
 
     select_start_time(
-        log.clone(), target_time,
-        move |log, mrt, mr, (ft, ts), (ft1, ts1)| avail_all(log, lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
+        log.clone(), target_time, source,
+        move |log, timespec| source.avail_all(log, timespec, params)
     )
     .map_ok(move |f| {
-        stream::iter(forecast_iterator(f, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter))
-            .then({ let log = log.clone(); move |(mrt, mr, ft, ts, ft1, ts1)| {
-                log.add_line(&format!("want {}/{:02} >> {}/{:03} .. {}/{:03}", mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1));
-                fetch_all(log.clone(), lat, lon, (mrt.date(), mr), (ft, ts), (ft1, ts1), params)
+        stream::iter(forecast_iterator(f, target_time, source))
+            .then({ let log = log.clone(); move |timespec| {
+                log.add_line(&format!("want {} {}", source, timespec));
+                fetch_all(source, log.clone(), lat, lon, timespec, params)
             }})
             .inspect_err(move |e| log.add_line(&format!("monitor stream error: {}", e)))
             .then(future::ok) // stream of values --> stream of results
@@ -417,14 +465,14 @@ pub fn daily_iterator(
 }
 
 pub fn daily_forecast_stream(
-    log: Arc<TaggedLog>, lat: f32, lon: f32, sendh: u8, targeth: u8, tz: chrono_tz::Tz, params: ParameterFlags
+    log: Arc<TaggedLog>, lat: f32, lon: f32, sendh: u8, targeth: u8, tz: chrono_tz::Tz, source: DataSource, params: ParameterFlags
 ) -> impl Stream<Item=Result<Forecast, String>> {
     stream::iter(daily_iterator(chrono::Utc::now(), sendh, targeth, tz))
         .then(move |(at, target)| {
             let dur = (at - chrono::Utc::now()).to_std().unwrap_or_default();
             tokio::time::delay_for(dur)
                 .then({ let log = log.clone(); move |()|
-                    forecast_stream(log, lat, lon, target, params)
+                    forecast_stream(log, lat, lon, target, source, params)
                         .into_future()
                         .map(|(head, _tail)| head.unwrap_or_else(|| Err("empty daily stream".to_owned())))
                 })

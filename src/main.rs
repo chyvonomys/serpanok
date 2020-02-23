@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::sync::Arc;
 use chrono::{Datelike, Timelike, TimeZone};
-use serde_derive::Serialize;
+use serde_derive::{Serialize, Deserialize};
 use lazy_static::*;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
@@ -21,12 +21,71 @@ pub enum Parameter {
     RelHumidity2m,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-enum DataSource {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DataSource {
     IconEu,
-    Gfs025,
-    Gfs050,
-    Gfs100,
+    Gfs(gfs::GfsResolution),
+}
+
+impl DataSource {
+    fn from_latlon(lat: f32, lon: f32) -> Option<Self> {
+        if DataSource::IconEu.covers_point(lat, lon) {
+            Some(DataSource::IconEu)
+        } else if DataSource::Gfs(gfs::GfsResolution::Deg050).covers_point(lat, lon) {
+            Some(DataSource::Gfs(gfs::GfsResolution::Deg050))
+        } else {
+            None
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "ICON_EU" => Some(DataSource::IconEu),
+            "GFS_025" => Some(DataSource::Gfs(gfs::GfsResolution::Deg025)),
+            "GFS_050" => Some(DataSource::Gfs(gfs::GfsResolution::Deg050)),
+            "GFS_100" => Some(DataSource::Gfs(gfs::GfsResolution::Deg100)),
+            _ => None,
+        }
+    }
+
+    fn covers_point(&self, lat: f32, lon: f32) -> bool {
+        match self {
+            DataSource::IconEu => icon::covers_point(lat, lon),
+            DataSource::Gfs(res) => gfs::covers_point(*res, lat, lon),
+        }
+    }
+    fn modelrun_iter(&self) -> impl Iterator<Item=u8> {
+        match self {
+            DataSource::IconEu => either::Either::Left( icon::modelrun_iter() ),
+            DataSource::Gfs(_) => either::Either::Right( gfs::modelrun_iter() ),
+        }
+    }
+    fn timestep_iter(&self, mr: u8) -> impl Iterator<Item=u16> {
+        match self {
+            DataSource::IconEu => either::Either::Left( icon::timestep_iter(mr) ),
+            DataSource::Gfs(res) => either::Either::Right( gfs::timestep_iter(*res) ),
+        }
+    }
+
+    fn avail_all(
+        &self, log: Arc<TaggedLog>, timespec: data::ForecastTimeSpec, params: data::ParameterFlags
+    ) -> impl Future<Output=Result<(), String>> {
+        match self {
+            DataSource::IconEu => data::icon_avail_all(log, timespec, params).left_future(),
+            DataSource::Gfs(res) => data::gfs_avail_all(*res, log, timespec).right_future(),
+        }
+    }
+}
+
+impl std::fmt::Display for DataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            DataSource::IconEu => "ICON_EU",
+            DataSource::Gfs(gfs::GfsResolution::Deg025) => "GFS_025",
+            DataSource::Gfs(gfs::GfsResolution::Deg050) => "GFS_050",
+            DataSource::Gfs(gfs::GfsResolution::Deg100) => "GFS_100",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -72,9 +131,7 @@ impl FileKey {
     fn build_data_file(&self) -> Box<dyn DataFile> {
         match self.source { // TODO: filekey contains datasource
             DataSource::IconEu => Box::new(icon::IconFile::new(&self)),
-            DataSource::Gfs025 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg025)),
-            DataSource::Gfs050 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg050)),
-            DataSource::Gfs100 => Box::new(gfs::GfsFile::new(&self, gfs::GfsResolution::Deg100)),
+            DataSource::Gfs(res) => Box::new(gfs::GfsFile::new(&self, res)),
         }
     }
 }
@@ -84,6 +141,7 @@ trait DataFile: Send + Sync {
     fn fetch_bytes(&self, log: Arc<TaggedLog>) -> Box<dyn Future<Output=Result<Vec<u8>, String>> + Send + Unpin>;
     fn available_from(&self) -> chrono::DateTime<chrono::Utc>;
     fn available_to(&self) -> chrono::DateTime<chrono::Utc>;
+    fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin>;
 }
 
 mod grib;
@@ -258,9 +316,13 @@ fn serpanok_api(
             Box::new(f)
         },
         (&hyper::Method::GET, "/modeltimes") => {
-            let body = icon::icon_modelrun_iter().map(|mr| {
-                format!("------- MODEL RUN {:02} ---------------------\n{:?}\n", mr, icon::icon_timestep_iter(mr).collect::<Vec<_>>())
-            }).fold(String::new(), |mut acc, x| {acc.push_str(&x); acc});
+            let source = params.get("source")
+                .and_then(|q| DataSource::from_str(q))
+                .unwrap_or(DataSource::IconEu);
+            let body = source.modelrun_iter().map(|mr| format!(
+                "------- MODEL RUN {:02} ---------------------\n{:?}\n",
+                mr, source.timestep_iter(mr).collect::<Vec<_>>()
+            )).fold(String::new(), |mut acc, x| {acc.push_str(&x); acc});
             Box::new(future::ok(hresp(200, body, "text/plain")))
         },
         (&hyper::Method::GET, "/dryrun") => {
@@ -269,17 +331,17 @@ fn serpanok_api(
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                 .map(|f| f.into())
                 .unwrap_or_else(chrono::Utc::now);
+            let source = params.get("source")
+                .and_then(|q| DataSource::from_str(q))
+                .unwrap_or(DataSource::IconEu);
             let mut res = String::new();
             res.push_str("----------------------------\n");
             res.push_str(&format!("start:  {}\n", start_time.to_rfc3339_debug()));
             res.push_str(&format!("now:    {}\n", chrono::Utc::now().to_rfc3339_debug()));
             res.push_str(&format!("target: {}\n", target_time.to_rfc3339_debug()));
             res.push_str("----------------------------\n");
-            let body = data::forecast_iterator(start_time, target_time, icon::icon_modelrun_iter, icon::icon_timestep_iter)
-                .map(|(mrt, mr, ft, ts, ft1, ts1)| format!(
-                    "* {}/{:02} >> {}/{:03}  add {}/{:03}\n",
-                    mrt.to_rfc3339_debug(), mr, ft.to_rfc3339_debug(), ts, ft1.to_rfc3339_debug(), ts1
-                ))
+            let body = data::forecast_iterator(start_time, target_time, source)
+                .map(|timespec| format!("* {}\n", timespec))
                 .fold(res, |mut acc, x| {acc.push_str(&x); acc});
             Box::new(future::ok(hresp(200, body, "text/plain")))
         },
@@ -420,6 +482,9 @@ fn serpanok_api(
             Box::new(future::ok(hresp(200, text, "text/plain")))
         },
         (&hyper::Method::GET, "/query") => {
+            let source = params.get("source")
+                .and_then(|q| DataSource::from_str(q))
+                .unwrap_or(DataSource::IconEu);
             let target = params.get("target")
                 .and_then(|q| chrono::DateTime::parse_from_rfc3339(q).ok())
                 .map(|f| f.into())
@@ -428,7 +493,8 @@ fn serpanok_api(
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
             let tz = lookup_tz(lat, lon);
             let log = Arc::new(TaggedLog {tag: "=query=".to_owned()});
-            let f = data::forecast_stream(log, lat, lon, target, data::ParameterFlags::default()).into_future()
+            let f = data::forecast_stream(log, lat, lon, target, source, data::ParameterFlags::default())
+                .into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))
                 .map_ok(move |f| format::format_forecast(&None, lat, lon, &f, tz))
