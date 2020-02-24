@@ -25,8 +25,10 @@ fn test_gfs_fetch() {
     use crate::grib;
     use crate::data;
     use futures::{future, stream, StreamExt, TryStreamExt};
-    let s = stream::iter(vec![GfsResolution::Deg100].into_iter()).then(|res| {
-        let key = FileKey::new(SourceParameter::Gfs(GfsParameter::UComponentWind10m, res), chrono::Utc::today().pred(), 0, 3);
+    let ps = [GfsParameter::Temperature2m, GfsParameter::UComponentWind10m, GfsParameter::TotalCloudCover50mb, GfsParameter::TotalCloudCover1000mb, GfsParameter::TotalCloudCoverAvgAtm];
+    let it = ps.iter().flat_map(|p| [GfsResolution::Deg100].iter().map(move |r| (*p, *r)));
+    let s = stream::iter(it).then(|(param, res)| {
+        let key = FileKey::new(SourceParameter::Gfs(param, res), chrono::Utc::today().pred(), 0, 3);
         let log = std::sync::Arc::new(TaggedLog{tag: "//test//".to_owned()});
         let f = cache::make_fetch_grid_fut(log, key)
             .inspect_ok(|msg| println!("{:#?}", msg))
@@ -216,13 +218,13 @@ impl DataFile for GfsFile {
                     let next_item = iter.next();
                     println!("{:#?}\n{:#?}", item, next_item);
                     match (item, next_item) {
-                        (Some(i), Some(ni)) => Ok((i.offset, ni.offset)),
+                        (Some(i), Some(ni)) => Ok((i.offset, ni.offset-1)),
                         _ => Err("could not find item in .idx".to_owned()),
                     }
                 })
             )
             .and_then(move |(from, to)| {
-                log.add_line(&format!("fetch bytes {}-{} ({})", from, to, to-from));
+                log.add_line(&format!("fetch bytes [{}-{}] ({})", from, to, to + 1 - from));
                 fetch_url(log, url, &[("Range", &format!("bytes={}-{}", from, to))])
             });
         Box::new(f)
@@ -246,6 +248,9 @@ pub enum GfsParameter {
     Temperature2m,
     UComponentWind10m,
     VComponentWind10m,
+    TotalCloudCover50mb,
+    TotalCloudCover1000mb,
+    TotalCloudCoverAvgAtm,
 }
 
 impl GfsParameter {
@@ -254,6 +259,9 @@ impl GfsParameter {
             GfsParameter::Temperature2m => "TMP",
             GfsParameter::UComponentWind10m => "UGRD",
             GfsParameter::VComponentWind10m => "VGRD",
+            GfsParameter::TotalCloudCover50mb => "TCDC",
+            GfsParameter::TotalCloudCover1000mb => "TCDC",
+            GfsParameter::TotalCloudCoverAvgAtm => "TCDC",
         }
     }
 
@@ -262,6 +270,9 @@ impl GfsParameter {
             GfsParameter::Temperature2m => "2 m above ground",
             GfsParameter::UComponentWind10m => "10 m above ground",
             GfsParameter::VComponentWind10m=> "10 m above ground",
+            GfsParameter::TotalCloudCover50mb => "50 mb",
+            GfsParameter::TotalCloudCover1000mb => "1000 mb",
+            GfsParameter::TotalCloudCoverAvgAtm => "entire atmosphere",
         }
     }
 
@@ -270,6 +281,9 @@ impl GfsParameter {
             GfsParameter::Temperature2m => "TMP_2m",
             GfsParameter::UComponentWind10m => "UGRD_10m",
             GfsParameter::VComponentWind10m => "VGRD_10m",
+            GfsParameter::TotalCloudCover50mb => "TCDC_50mb",
+            GfsParameter::TotalCloudCover1000mb => "TCDC_1000mb",
+            GfsParameter::TotalCloudCoverAvgAtm => "TCDC_atm",
         }
     }
 
@@ -278,6 +292,9 @@ impl GfsParameter {
             "TMP_2m" => Some(GfsParameter::Temperature2m),
             "UGRD_10m" => Some(GfsParameter::UComponentWind10m),
             "VGRD_10m" => Some(GfsParameter::VComponentWind10m),
+            "TCDC_50mb" => Some(GfsParameter::TotalCloudCover50mb),
+            "TCDC_1000mb" => Some(GfsParameter::TotalCloudCover1000mb),
+            "TCDC_atm" => Some(GfsParameter::TotalCloudCoverAvgAtm),
             _ => None
         }
     }

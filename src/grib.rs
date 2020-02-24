@@ -148,7 +148,8 @@ pub enum ProductDef {
     Template8 {
         common: CommonProductDef,
         overall_time_interval_end: Ymdhms,
-        time_range: u32,
+        stat_proc: StatisticalProcess,
+        time_range: TimeAmount,
     },
     Template0 {
         common: CommonProductDef,
@@ -172,21 +173,48 @@ named!(parse_section4_template0<ProductDef>, do_parse!(
     })
 ));
 
+// CodeTable 4.10
+#[derive(Debug)]
+enum StatisticalProcess {
+    Average,
+    Accumulation,
+}
+
+named!(parse_stat_proc<StatisticalProcess>, switch!(call!(be_u8),
+    0 => value!(StatisticalProcess::Average) |
+    1 => value!(StatisticalProcess::Accumulation)
+));
+
+
+#[derive(Debug)]
+pub enum TimeAmount {
+    Minutes(u32),
+    Hours(u32),
+    Missing,
+}
+
+named!(parse_time_amount<TimeAmount>, do_parse!(
+    t: switch!(call!(be_u8), // CodeTable 4.4
+        0 => map!(call!(be_u32), |x| TimeAmount::Minutes(x)) |
+        1 => map!(call!(be_u32), |x| TimeAmount::Hours(x)) |
+        0xFF => map!(tag!(&[0; 4]), |_| TimeAmount::Missing)
+    ) >>
+    (t)
+));
+
 named!(parse_section4_template8<ProductDef>, do_parse!(
     _template_id: verify!(call!(be_u16), |x| x == 8) >>
     common: call!(parse_common_productdef) >>
     overall_time_interval_end: call!(parse_ymdhms) >>
     _time_range_n: tag!(&[1]) >>
     _missing_in_stat_proc_n: tag!(&[0; 4]) >>
-    _statistical_proc_type: tag!(&[1]) >> // Accumulation  (grib2/tables/19/4.10.table)
+    stat_proc: call!(parse_stat_proc) >>
     _time_increment_type: tag!(&[2]) >> // Successive times processed have same start time of forecast, forecast time is incremented  (grib2/tables/19/4.11.table)
-    _time_range_unit: tag!(&[0]) >> // Minute  (grib2/tables/19/4.4.table)
-    time_range: call!(be_u32) >>
-    _time_increment_unit: tag!(&[255]) >> // Missing  (grib2/tables/19/4.4.table)
-    _time_increment: tag!(&[0; 4]) >>
+    time_range: call!(parse_time_amount) >>
+    _time_increment: call!(parse_time_amount) >>
         
     (ProductDef::Template8 {
-        common, overall_time_interval_end, time_range
+        common, overall_time_interval_end, stat_proc, time_range
     })
 ));
 
@@ -194,10 +222,8 @@ named!(parse_section4_template8<ProductDef>, do_parse!(
 pub struct CommonProductDef {
     pub parameter_cat: u8,
     pub parameter_num: u8,
-    pub time_units: u8,
-    pub forecast_time: u32,
-    pub level1_type: u8,
-    pub level1_value: u32,
+    pub forecast_time: TimeAmount,
+    pub level1: FixedSurface,
 }
 
 #[derive(Debug)]
@@ -215,27 +241,44 @@ named!(parse_section4<Section4>, do_parse!(
     })
 ));
 
+#[derive(Debug)]
+pub enum FixedSurface {
+    Isobaric(u32),
+    AboveGround(u32),
+    EntireAtmosphere,
+    GroundOrWater,
+    MeanSeaLevel,
+    Missing,
+}
+
+named!(parse_fixed_surface<FixedSurface>, do_parse!(
+    typ: call!(be_u8) >> // CodeTable 4.5
+    surf: switch!(value!(typ),
+        100 => do_parse!(_factor: tag!(&[0]) >> value: call!(be_u32) >> (FixedSurface::Isobaric(value))) |
+        103 => do_parse!(_factor: tag!(&[0]) >> value: call!(be_u32) >> (FixedSurface::AboveGround(value))) |
+        101 => map!(tag!(&[0; 5]), |_| FixedSurface::MeanSeaLevel) |
+        10 => map!(tag!(&[0; 5]), |_| FixedSurface::EntireAtmosphere) |
+        1 => map!(tag!(&[0; 5]), |_| FixedSurface::GroundOrWater) |
+        0xFF => map!(alt!(tag!(&[0xFF; 5]) | tag!(&[0; 5])), |_| FixedSurface::Missing) // GFS has zero here
+    ) >>
+
+    (surf)
+));
+
 named!(parse_common_productdef<CommonProductDef>, do_parse!(
-    parameter_cat: call!(be_u8) >>
-    parameter_num: call!(be_u8) >>
-    _gen_proc_type: tag!(&[2]) >>
+    parameter_cat: call!(be_u8) >> // CodeTable 4.1
+    parameter_num: call!(be_u8) >> // CodeTable 4.2
+    _gen_proc_type: tag!(&[2]) >> // CodeTable 4.3
     _bg_proc: call!(be_u8) >>
     _gen_proc_id: call!(be_u8) >>
     _cutoff_hours: tag!(&[0, 0]) >>
     _cutoff_mins: tag!(&[0]) >>
-    time_units: map!(alt!(tag!(&[0]) | tag!(&[1])), |x| x[0]) >>
-    forecast_time: call!(be_u32) >>
-    level1_type: call!(be_u8) >>
-    _level1_factor: tag!(&[0]) >>
-    level1_value: call!(be_u32) >>
-    _level2_type: tag!(&[0xFF]) >>
-    _level2_factor: alt!(tag!(&[0xFF]) | tag!(&[0])) >> // GFS has zero here
-    _level2_value: alt!(tag!(&[0xFF; 4]) | tag!(&[0; 4])) >> // GFS has zeroes here
+    forecast_time: call!(parse_time_amount) >>
+    level1: call!(parse_fixed_surface) >>
+    _level2: call!(parse_fixed_surface) >>
     
     (CommonProductDef {
-        parameter_cat, parameter_num,
-        time_units, forecast_time,
-        level1_type, level1_value,
+        parameter_cat, parameter_num, forecast_time, level1,
     })
 ));
 
@@ -348,6 +391,7 @@ named!(parse_section5<Section5>, do_parse!(
 pub enum CodedValues {
     RawJpeg2000(Vec<u8>),
     Simple16Bit(Vec<u16>),
+    Simple0Bit,
     ComplexSpatialDiff {
         h1: u32,
         h2: u32,
@@ -398,6 +442,15 @@ pub fn decode_original_values(msg: &GribMessage) -> Result<Vec<f32>, String> {
             Ok(vec)
         },
         GribMessage{
+            section5: Section5{ packing: Packing::Simple {r, d, x2_bits: 0, ..}, n_values },
+            section7: Section7{ coded_values: CodedValues::Simple0Bit },
+            ..
+        } => {
+            let tenp = 10f32.powf(f32::from(-d));
+            let vec = vec![r * tenp; *n_values as usize];
+            Ok(vec)
+        },
+        GribMessage{
             section5: Section5{ packing: Packing::ComplexSpatialDiff {r, e, d, ..}, .. },
             section7: Section7{ coded_values: CodedValues::ComplexSpatialDiff {h1, h2, hmin, ref x1rle, ref x2s} },
             ..
@@ -439,6 +492,7 @@ impl fmt::Debug for Section7 {
         write!(f, "Section7 {{ coded_values: <{}> }} ", match &self.coded_values {
             CodedValues::RawJpeg2000(v) => format!("Jpeg2000 {} bytes", v.len()),
             CodedValues::Simple16Bit(v) => format!("{} 16bit values", v.len()),
+            CodedValues::Simple0Bit => "0bit values".to_owned(),
             CodedValues::ComplexSpatialDiff{ h1, h2, hmin, x1rle, x2s } => format!(
                 "Complex packing + spatial differencing\nh1={}, h2={}, hmin={}\nX1={} pairs:\n{:?}...\n...{:?}\nX2={} data points:\n{:?}...\n...{:?}",
                 h1, h2, hmin,
@@ -463,6 +517,13 @@ named!(parse_section7_template0_16bit<Section7>, do_parse!(
     coded_values: map!(count!(be_u16, ((length - 5) / 2) as usize), |v| CodedValues::Simple16Bit(v)) >>
 
     (Section7 { coded_values })
+));
+
+named!(parse_section7_template0_0bit<Section7>, do_parse!(
+    _length: verify!(call!(be_u32), |l| l == 5) >>
+    _section_id: tag!(&[7]) >>
+
+    (Section7 { coded_values: CodedValues::Simple0Bit })
 ));
 
 fn octets_for(n: u32, width: u8) -> usize {
@@ -554,6 +615,7 @@ named!(pub parse_message<GribMessage>, do_parse!(
     _section6: tag!(&[0, 0, 0, 6, 6, 0xFF]) >>
     section7: switch!(value!(&section5.packing),
         &Packing::Simple{ x2_bits: 16, .. } => call!(parse_section7_template0_16bit) |
+        &Packing::Simple{ x2_bits: 0, .. } => call!(parse_section7_template0_0bit) |
         &Packing::ComplexSpatialDiff{
             ng, sd_bytes, x1_bits,
             group_width_ref, group_width_bits,
