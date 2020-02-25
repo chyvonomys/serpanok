@@ -5,19 +5,6 @@ use serde_derive::{Serialize, Deserialize};
 use lazy_static::*;
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum TargetParameter {
-    Temperature2m,
-    TotalCloudCover,
-    WindSpeedU10m,
-    WindSpeedV10m,
-    SnowPrecipRate,
-    RainPrecipRate,
-    SnowDepth,
-    PressureMSL,
-    RelHumidity2m,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 enum SourceParameter {
     IconEu(icon::IconParameter),
@@ -43,8 +30,8 @@ impl DataSource {
     fn from_latlon(lat: f32, lon: f32) -> Option<Self> {
         if DataSource::IconEu.covers_point(lat, lon) {
             Some(DataSource::IconEu)
-        } else if DataSource::Gfs(gfs::GfsResolution::Deg050).covers_point(lat, lon) {
-            Some(DataSource::Gfs(gfs::GfsResolution::Deg050))
+        } else if DataSource::Gfs(gfs::GfsResolution::Deg025).covers_point(lat, lon) {
+            Some(DataSource::Gfs(gfs::GfsResolution::Deg025))
         } else {
             None
         }
@@ -57,6 +44,13 @@ impl DataSource {
             "GFS_050" => Some(DataSource::Gfs(gfs::GfsResolution::Deg050)),
             "GFS_100" => Some(DataSource::Gfs(gfs::GfsResolution::Deg100)),
             _ => None,
+        }
+    }
+
+    fn default_params(self) -> data::ParameterFlags {
+        match self {
+            DataSource::IconEu => data::ParameterFlags::icon(),
+            DataSource::Gfs(_) => data::ParameterFlags::gfs(),
         }
     }
 
@@ -516,7 +510,7 @@ fn serpanok_api(
             let lon = params.get("lon").and_then(|q| q.parse::<f32>().ok()).unwrap_or(26.25f32);
             let tz = lookup_tz(lat, lon);
             let log = Arc::new(TaggedLog {tag: "=query=".to_owned()});
-            let f = data::forecast_stream(log, lat, lon, target, source, data::ParameterFlags::default())
+            let f = data::forecast_stream(log, lat, lon, target, source, source.default_params())
                 .into_future()
                 .map(|(h, _)| h)
                 .then(|opt| future::ready(opt.unwrap_or_else(|| Err("empty stream".to_owned()))))

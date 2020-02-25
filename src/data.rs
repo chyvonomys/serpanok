@@ -7,6 +7,7 @@ use std::sync::Arc;
 use chrono::{Timelike, TimeZone};
 use futures::{stream, Stream, StreamExt, TryStreamExt, future, Future, FutureExt, TryFutureExt};
 use itertools::Itertools; // tuple_windows, collect_vec
+use bitflags::*;
 
 pub struct ForecastTimeSpec {
     modelrun_time: chrono::DateTime<chrono::Utc>,
@@ -77,6 +78,8 @@ pub fn sample_value(values: &[f32], s3: &grib::Section3, latf: f32, lonf: f32) -
 
     let lon0 = if s3.lon_first > s3.lon_last { s3.lon_first - 360_000_000 } else { s3.lon_first };
     let lon1 = s3.lon_last;
+
+    let lon = if lon < lon0 { lon + 360_000_000 } else { lon };
 
     let lat0 = s3.lat_first;
     let lat1 = s3.lat_last;
@@ -205,31 +208,62 @@ type ModelrunSpec = (chrono::Date<chrono::Utc>, u8);
 
 use serde_derive::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
-pub struct ParameterFlags {
-    pub tcc: bool,
-    pub wind: bool,
-    pub precip: bool,
-    pub rain: bool,
-    pub snow: bool,
-    pub depth: bool,
-    pub pmsl: bool,
-    pub relhum: bool,
+bitflags! {
+    #[derive(Serialize, Deserialize)]
+    struct TargetParameters: u16 {
+        const TEMPERATURE_2M    = 0b0001;
+        const TOTAL_CLOUD_COVER = 0b0010;
+        const WIND_SPEED_UV10M  = 0b0100;
+        const SNOW_PRECIP_RATE  = 0b1000;
+        const RAIN_PRECIP_RATE  = 0b0001_0000;
+        const SNOW_DEPTH        = 0b0010_0000;
+        const PRESSURE_MSL      = 0b0100_0000;
+        const REL_HUMIDITY_2M   = 0b1000_0000;
+    }
 }
 
-impl Default for ParameterFlags {
-    fn default() -> Self {
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub struct ParameterFlags {
+    available: TargetParameters,
+    selected: TargetParameters,
+}
+
+impl ParameterFlags {
+    pub fn icon() -> Self {
+        let selected = 
+            TargetParameters::TEMPERATURE_2M | TargetParameters::TOTAL_CLOUD_COVER | TargetParameters::WIND_SPEED_UV10M |
+            TargetParameters::SNOW_PRECIP_RATE | TargetParameters::RAIN_PRECIP_RATE;
+
         Self {
-            tcc: true,
-            wind: true,
-            precip: false,
-            rain: true,
-            snow: true,
-            depth: false,
-            pmsl: false,
-            relhum: false,
+            available: TargetParameters::all(), selected
         }
     }
+
+    pub fn gfs() -> Self {
+        let available = TargetParameters::TEMPERATURE_2M | TargetParameters::WIND_SPEED_UV10M;
+
+        Self {
+            available, selected: available
+        }
+    }
+
+    pub fn flip_tmp(mut self) -> Self { self.selected.toggle(self.available &TargetParameters::TEMPERATURE_2M); self }
+    pub fn flip_tcc(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::TOTAL_CLOUD_COVER); self }
+    pub fn flip_wind(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::WIND_SPEED_UV10M); self }
+    pub fn flip_snow(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::SNOW_PRECIP_RATE); self }
+    pub fn flip_rain(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::RAIN_PRECIP_RATE); self }
+    pub fn flip_depth(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::SNOW_DEPTH); self }
+    pub fn flip_pmsl(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::PRESSURE_MSL); self }
+    pub fn flip_relhum(mut self) -> Self { self.selected.toggle(self.available & TargetParameters::REL_HUMIDITY_2M); self }
+
+    pub fn tmp(self) -> bool { self.selected.contains(TargetParameters::TEMPERATURE_2M) }
+    pub fn tcc(self) -> bool { self.selected.contains(TargetParameters::TOTAL_CLOUD_COVER) }
+    pub fn wind(self) -> bool { self.selected.contains(TargetParameters::WIND_SPEED_UV10M) }
+    pub fn snow(self) -> bool { self.selected.contains(TargetParameters::SNOW_PRECIP_RATE) }
+    pub fn rain(self) -> bool { self.selected.contains(TargetParameters::RAIN_PRECIP_RATE) }
+    pub fn depth(self) -> bool { self.selected.contains(TargetParameters::SNOW_DEPTH) }
+    pub fn pmsl(self) -> bool { self.selected.contains(TargetParameters::PRESSURE_MSL) }
+    pub fn relhum(self) -> bool { self.selected.contains(TargetParameters::REL_HUMIDITY_2M) }
 }
 
 pub fn gfs_avail_all(
@@ -252,44 +286,40 @@ pub fn icon_avail_all(
 
     let log1 = log.clone();
     let log2 = log.clone();
-    let log3 = log.clone();
     let log4 = log.clone();
     let log5 = log.clone();
     let mr = (timespec.modelrun_time.date(), timespec.modelrun);
     let ts = timespec.timestep0;
     let ts1 = timespec.timestep1;
 
-    use icon::IconParameter;
+    use SourceParameter::IconEu;
+    use icon::IconParameter::*;
 
     future::try_join4(
-        avail_value(log.clone(), SourceParameter::IconEu(IconParameter::Temperature2m), mr, ts),
+        opt_wrap(params.tmp(), { let l = log.clone(); move || avail_value(l, IconEu(Temperature2m), mr, ts)}),
         future::try_join3(
-            opt_wrap(params.tcc, { let l = log.clone(); move || avail_value(l, SourceParameter::IconEu(IconParameter::TotalCloudCover), mr, ts)}),
-            opt_wrap(params.relhum, { let l = log.clone(); move || avail_value(l, SourceParameter::IconEu(IconParameter::RelHumidity2m), mr, ts)}),
-            opt_wrap(params.pmsl, move || avail_value(log1, SourceParameter::IconEu(IconParameter::PressureMSL), mr, ts)),
+            opt_wrap(params.tcc(), { let l = log.clone(); move || avail_value(l, IconEu(TotalCloudCover), mr, ts)}),
+            opt_wrap(params.relhum(), { let l = log.clone(); move || avail_value(l, IconEu(RelHumidity2m), mr, ts)}),
+            opt_wrap(params.pmsl(), move || avail_value(log1, IconEu(PressureMSL), mr, ts)),
         ),
-        opt_wrap(params.wind, move || future::try_join(
-            avail_value(log2.clone(), SourceParameter::IconEu(IconParameter::WindSpeedU10m), mr, ts),
-            avail_value(log2, SourceParameter::IconEu(IconParameter::WindSpeedV10m), mr, ts),
+        opt_wrap(params.wind(), move || future::try_join(
+            avail_value(log2.clone(), IconEu(WindSpeedU10m), mr, ts),
+            avail_value(log2, IconEu(WindSpeedV10m), mr, ts),
         )),
-        future::try_join4(
-            opt_wrap(params.precip, move || future::try_join(
-                avail_value(log3.clone(), SourceParameter::IconEu(IconParameter::TotalAccumPrecip), mr, ts),
-                avail_value(log3, SourceParameter::IconEu(IconParameter::TotalAccumPrecip), mr, ts1),
+        future::try_join3(
+            opt_wrap(params.rain(), move || future::try_join4(
+                avail_value(log4.clone(), IconEu(LargeScaleRain), mr, ts),
+                avail_value(log4.clone(), IconEu(LargeScaleRain), mr, ts1),
+                avail_value(log4.clone(), IconEu(ConvectiveRain), mr, ts),
+                avail_value(log4, IconEu(ConvectiveRain), mr, ts1),
             )),
-            opt_wrap(params.rain, move || future::try_join4(
-                avail_value(log4.clone(), SourceParameter::IconEu(IconParameter::LargeScaleRain), mr, ts),
-                avail_value(log4.clone(), SourceParameter::IconEu(IconParameter::LargeScaleRain), mr, ts1),
-                avail_value(log4.clone(), SourceParameter::IconEu(IconParameter::ConvectiveRain), mr, ts),
-                avail_value(log4, SourceParameter::IconEu(IconParameter::ConvectiveRain), mr, ts1),
+            opt_wrap(params.snow(), move || future::try_join4(
+                avail_value(log5.clone(), IconEu(LargeScaleSnow), mr, ts),
+                avail_value(log5.clone(), IconEu(LargeScaleSnow), mr, ts1),
+                avail_value(log5.clone(), IconEu(ConvectiveSnow), mr, ts),
+                avail_value(log5, IconEu(ConvectiveSnow), mr, ts1),
             )),
-            opt_wrap(params.snow, move || future::try_join4(
-                avail_value(log5.clone(), SourceParameter::IconEu(IconParameter::LargeScaleSnow), mr, ts),
-                avail_value(log5.clone(), SourceParameter::IconEu(IconParameter::LargeScaleSnow), mr, ts1),
-                avail_value(log5.clone(), SourceParameter::IconEu(IconParameter::ConvectiveSnow), mr, ts),
-                avail_value(log5, SourceParameter::IconEu(IconParameter::ConvectiveSnow), mr, ts1),
-            )),
-            opt_wrap(params.depth, move || avail_value(log, SourceParameter::IconEu(IconParameter::SnowDepth), mr, ts)),
+            opt_wrap(params.depth(), move || avail_value(log, IconEu(SnowDepth), mr, ts)),
         ),
     ).map_ok(move |_| ())
 }
@@ -300,53 +330,48 @@ pub fn icon_fetch_all(
 
     let log1 = log.clone();
     let log2 = log.clone();
-    let log3 = log.clone();
     let log4 = log.clone();
     let log5 = log.clone();
     let mr = (timespec.modelrun_time.date(), timespec.modelrun);
     let ts = timespec.timestep0;
     let ts1 = timespec.timestep1;
 
-    use icon::IconParameter;
+    use SourceParameter::IconEu;
+    use icon::IconParameter::*;
 
     future::try_join4(
-        fetch_value(log.clone(), SourceParameter::IconEu(IconParameter::Temperature2m), lat, lon, mr, ts),
+        opt_wrap(params.tmp(), { let l = log.clone(); move || fetch_value(l, IconEu(Temperature2m), lat, lon, mr, ts)}),
         future::try_join3(
-            opt_wrap(params.tcc, { let l = log.clone(); move || fetch_value(l, SourceParameter::IconEu(IconParameter::TotalCloudCover), lat, lon, mr, ts)}),
-            opt_wrap(params.relhum, { let l = log.clone(); move || fetch_value(l, SourceParameter::IconEu(IconParameter::RelHumidity2m), lat, lon, mr, ts)}),
-            opt_wrap(params.pmsl, move || fetch_value(log1, SourceParameter::IconEu(IconParameter::PressureMSL), lat, lon, mr, ts)),
+            opt_wrap(params.tcc(), { let l = log.clone(); move || fetch_value(l, IconEu(TotalCloudCover), lat, lon, mr, ts)}),
+            opt_wrap(params.relhum(), { let l = log.clone(); move || fetch_value(l, IconEu(RelHumidity2m), lat, lon, mr, ts)}),
+            opt_wrap(params.pmsl(), move || fetch_value(log1, IconEu(PressureMSL), lat, lon, mr, ts)),
         ),
-        opt_wrap(params.wind, move || future::try_join(
-            fetch_value(log2.clone(), SourceParameter::IconEu(IconParameter::WindSpeedU10m), lat, lon, mr, ts),
-            fetch_value(log2, SourceParameter::IconEu(IconParameter::WindSpeedV10m), lat, lon, mr, ts),
+        opt_wrap(params.wind(), move || future::try_join(
+            fetch_value(log2.clone(), IconEu(WindSpeedU10m), lat, lon, mr, ts),
+            fetch_value(log2, IconEu(WindSpeedV10m), lat, lon, mr, ts),
         )),
-        future::try_join4(
-            opt_wrap(params.precip, move || future::try_join(
-                fetch_value(log3.clone(), SourceParameter::IconEu(IconParameter::TotalAccumPrecip), lat, lon, mr, ts),
-                fetch_value(log3, SourceParameter::IconEu(IconParameter::TotalAccumPrecip), lat, lon, mr, ts1),
+        future::try_join3(
+            opt_wrap(params.rain(), move || future::try_join4(
+                fetch_value(log4.clone(), IconEu(LargeScaleRain), lat, lon, mr, ts),
+                fetch_value(log4.clone(), IconEu(LargeScaleRain), lat, lon, mr, ts1),
+                fetch_value(log4.clone(), IconEu(ConvectiveRain), lat, lon, mr, ts),
+                fetch_value(log4, IconEu(ConvectiveRain), lat, lon, mr, ts1),
             )),
-            opt_wrap(params.rain, move || future::try_join4(
-                fetch_value(log4.clone(), SourceParameter::IconEu(IconParameter::LargeScaleRain), lat, lon, mr, ts),
-                fetch_value(log4.clone(), SourceParameter::IconEu(IconParameter::LargeScaleRain), lat, lon, mr, ts1),
-                fetch_value(log4.clone(), SourceParameter::IconEu(IconParameter::ConvectiveRain), lat, lon, mr, ts),
-                fetch_value(log4, SourceParameter::IconEu(IconParameter::ConvectiveRain), lat, lon, mr, ts1),
+            opt_wrap(params.snow(), move || future::try_join4(
+                fetch_value(log5.clone(), IconEu(LargeScaleSnow), lat, lon, mr, ts),
+                fetch_value(log5.clone(), IconEu(LargeScaleSnow), lat, lon, mr, ts1),
+                fetch_value(log5.clone(), IconEu(ConvectiveSnow), lat, lon, mr, ts),
+                fetch_value(log5, IconEu(ConvectiveSnow), lat, lon, mr, ts1),
             )),
-            opt_wrap(params.snow, move || future::try_join4(
-                fetch_value(log5.clone(), SourceParameter::IconEu(IconParameter::LargeScaleSnow), lat, lon, mr, ts),
-                fetch_value(log5.clone(), SourceParameter::IconEu(IconParameter::LargeScaleSnow), lat, lon, mr, ts1),
-                fetch_value(log5.clone(), SourceParameter::IconEu(IconParameter::ConvectiveSnow), lat, lon, mr, ts),
-                fetch_value(log5, SourceParameter::IconEu(IconParameter::ConvectiveSnow), lat, lon, mr, ts1),
-            )),
-            opt_wrap(params.depth, move || fetch_value(log, SourceParameter::IconEu(IconParameter::SnowDepth), lat, lon, mr, ts)),
+            opt_wrap(params.depth(), move || fetch_value(log, IconEu(SnowDepth), lat, lon, mr, ts)),
         ),
     )
-    .map_ok(move |(t, (otcc, orhum, opmsl), owind, (oprecip, orain, osnow, odepth))| Forecast {
-        temperature: t,
+    .map_ok(move |(ot, (otcc, orhum, opmsl), owind, (orain, osnow, odepth))| Forecast {
+        temperature: ot,
         total_cloud_cover: otcc,
         rel_humidity: orhum,
         pressure_msl: opmsl,
         wind_speed: owind,
-        total_precip_accum: oprecip,
         rain_accum: orain.map(|(ls0, ls1, c0, c1)| (ls0 + c0, ls1 + c1)),
         snow_accum: osnow.map(|(ls0, ls1, c0, c1)| (ls0 + c0, ls1 + c1)),
         snow_depth: odepth,
@@ -358,24 +383,26 @@ pub fn gfs_fetch_all(
     log: Arc<TaggedLog>, lat: f32, lon: f32, timespec: ForecastTimeSpec, params: ParameterFlags, res: gfs::GfsResolution
 ) -> impl Future<Output=Result<Forecast, String>> {
 
+    let log1 = log.clone();
     let mr = (timespec.modelrun_time.date(), timespec.modelrun);
     let ts = timespec.timestep0;
 
+    use SourceParameter::Gfs;
     use gfs::GfsParameter::*;
+
     future::try_join(
-        fetch_value(log.clone(), SourceParameter::Gfs(Temperature2m, res), lat, lon, mr, ts),
-        opt_wrap(params.wind, move || future::try_join(
-            fetch_value(log.clone(), SourceParameter::Gfs(UComponentWind10m, res), lat, lon, mr, ts),
-            fetch_value(log, SourceParameter::Gfs(VComponentWind10m, res), lat, lon, mr, ts),
+        opt_wrap(params.tmp(), move || fetch_value(log1, Gfs(Temperature2m, res), lat, lon, mr, ts)),
+        opt_wrap(params.wind(), move || future::try_join(
+            fetch_value(log.clone(), Gfs(UComponentWind10m, res), lat, lon, mr, ts),
+            fetch_value(log, Gfs(VComponentWind10m, res), lat, lon, mr, ts),
         ))
     )
-        .map_ok(move |(t, owind)| Forecast {
-            temperature: t,
+        .map_ok(move |(ot, owind)| Forecast {
+            temperature: ot,
             total_cloud_cover: None,
             rel_humidity: None,
             pressure_msl: None,
             wind_speed: owind,
-            total_precip_accum: None,
             rain_accum: None,
             snow_accum: None,
             snow_depth: None,
@@ -418,13 +445,12 @@ where
 }
 
 pub struct Forecast {
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     pub time: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
     pub total_cloud_cover: Option<f32>,
     pub rel_humidity: Option<f32>,
     pub pressure_msl: Option<f32>,
     pub wind_speed: Option<(f32, f32)>,
-    pub total_precip_accum: Option<(f32, f32)>,
     pub rain_accum: Option<(f32, f32)>,
     pub snow_accum: Option<(f32, f32)>,
     pub snow_depth: Option<f32>,

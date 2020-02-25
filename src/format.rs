@@ -85,10 +85,9 @@ pub fn format_forecast(name: &Option<String>, lat: f32, lon: f32, f: &data::Fore
     result.push_str(&format_place_link(name, lat, lon));
     result.push('\n');
     result.push_str(&format!("_{}_\n", format_time(f.time.0.with_timezone(&tz))));
-    result.push_str(&format!("t повітря: *{:.1}°C*\n", (10.0 * (f.temperature - 273.15)).round() / 10.0));
-    if let Some(precip) = f.total_precip_accum {
-        let precip_rate = ((precip.1 - precip.0) * 60.0 / interval).max(0.0);
-        result.push_str(&format!("опади: *{:.02}*\n", precip_rate));
+    if let Some(tmpk) = f.temperature {
+        let tmpc = (10.0 * (tmpk - 273.15)).round() / 10.0;
+        result.push_str(&format!("t повітря: *{:.1}°C*\n", tmpc));
     }
     if let Some(rain) = f.rain_accum {
         let rain_rate = ((rain.1 - rain.0) * 60.0 / interval).max(0.0);

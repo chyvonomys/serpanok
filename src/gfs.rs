@@ -149,6 +149,7 @@ pub fn filename_to_filekey(filename: &str) -> Option<FileKey> {
 }
 
 pub fn covers_point(res: GfsResolution, lat: f32, lon: f32) -> bool {
+    let lon = if lon < 0.0 { lon + 360.0 } else { lon };
     lat >= -90.0 && lat <= 90.0 && lon >= 0.0 && lon <= match res {
         GfsResolution::Deg025 => 359.75,
         GfsResolution::Deg050 => 359.5,

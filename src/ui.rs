@@ -40,8 +40,8 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
                 tokio::time::Instant::now() + tokio::time::Duration::from_secs(d),
                 tokio::time::Duration::from_secs(d)
             ).map(|_x| Ok(data::Forecast{
-                temperature: 0.0, time: (chrono::Utc::now(), chrono::Utc::now()),
-                rain_accum: None, snow_accum: None, snow_depth: None, total_precip_accum: None, total_cloud_cover: None,
+                temperature: None, time: (chrono::Utc::now(), chrono::Utc::now()),
+                rain_accum: None, snow_accum: None, snow_depth: None, total_cloud_cover: None,
                 wind_speed: None, rel_humidity: None, pressure_msl: None
             }))
                 .take(n).boxed()
@@ -308,11 +308,12 @@ struct WidgetState {
     params: data::ParameterFlags,
 }
 
+// TODO: escape names for markdown 
 fn format_widget_text(state: &WidgetState, time: Option<&Mode>) -> TgText {
     let s = format!(
         "місце: {}\nчасовий пояс: _{}_{}",
         format::format_place_link(&state.name, state.lat, state.lon),
-        state.tz.name(),
+        state.tz.name().replace("_", " "), // markdown
         match time {
             Some(Mode::Once(datetime)) => {
                 let local = datetime.with_timezone(&state.tz);
@@ -330,6 +331,7 @@ fn format_widget_text(state: &WidgetState, time: Option<&Mode>) -> TgText {
             None => String::default(),
         }
     );
+    println!("TEXT: {}", s);
     TgText::Markdown(s)
 }
 
@@ -543,23 +545,24 @@ fn adjust_params_screen(
 ) -> impl Future<Output=Result<(bool, data::ParameterFlags), String>> {
 
     let kb = vec![
-        vec![opt_btn("t повітря", true, PADDING_DATA), opt_btn("шар снігу", params.depth, "depth")],
-        vec![opt_btn("дощ", params.rain, "rain"), opt_btn("сніг", params.snow, "snow")],
-        vec![opt_btn("хмарність", params.tcc, "tcc"), opt_btn("вітер", params.wind, "wind")],
-        vec![opt_btn("атм. тиск", params.pmsl, "pmsl"), opt_btn("відн. вологість", params.relhum, "relhum")],
+        vec![opt_btn("t повітря", params.tmp(), "tmp"), opt_btn("шар снігу", params.depth(), "depth")],
+        vec![opt_btn("дощ", params.rain(), "rain"), opt_btn("сніг", params.snow(), "snow")],
+        vec![opt_btn("хмарність", params.tcc(), "tcc"), opt_btn("вітер", params.wind(), "wind")],
+        vec![opt_btn("тиск", params.pmsl(), "pmsl"), opt_btn("вологість", params.relhum(), "relhum")],
         vec![btn("ок", "ok")],
     ];
 
     keyboard_input(chat_id, widget_msg_id, kb)
         .and_then(move |d| future::ready(match d.as_str() {
             "ok" => Ok((true, params)),
-            "depth" =>  Ok((false, data::ParameterFlags{ depth: !params.depth,   ..params})),
-            "rain" =>   Ok((false, data::ParameterFlags{ rain: !params.rain,     ..params})),
-            "snow" =>   Ok((false, data::ParameterFlags{ snow: !params.snow,     ..params})),
-            "tcc" =>    Ok((false, data::ParameterFlags{ tcc: !params.tcc,       ..params})),
-            "wind" =>   Ok((false, data::ParameterFlags{ wind: !params.wind,     ..params})),
-            "pmsl" =>   Ok((false, data::ParameterFlags{ pmsl: !params.pmsl,     ..params})),
-            "relhum" => Ok((false, data::ParameterFlags{ relhum: !params.relhum, ..params})),
+            "tmp" =>    Ok( (false, params.flip_tmp()) ),
+            "tcc" =>    Ok( (false, params.flip_tcc()) ),
+            "wind" =>   Ok( (false, params.flip_wind()) ),
+            "rain" =>   Ok( (false, params.flip_rain()) ),
+            "snow" =>   Ok( (false, params.flip_snow()) ),
+            "depth" =>  Ok( (false, params.flip_depth()) ),
+            "pmsl" =>   Ok( (false, params.flip_pmsl()) ),
+            "relhum" => Ok( (false, params.flip_relhum()) ),
             x => Err(format!("unexpected param click `{}`", x)),
         }))
 }
@@ -647,7 +650,7 @@ fn config_screen(
 fn process_widget(chat_id: i64, lat: f32, lon: f32, source: DataSource, name: Option<String>) -> impl Future<Output=Result<(), String>> {
 
     let state = WidgetState {
-        lat, lon, name, tz: lookup_tz(lat, lon), params: data::ParameterFlags::default()
+        lat, lon, name, tz: lookup_tz(lat, lon), params: source.default_params()
     };
 
     let text = format_widget_text(&state, None);
@@ -673,12 +676,13 @@ fn process_widget(chat_id: i64, lat: f32, lon: f32, source: DataSource, name: Op
                     None => future::Either::Right(future::ok(0)),
                 })
                 .map_ok(|_n| ())
-                .or_else(move |err| {
-                    let report_text = TgText::Markdown(format!("error in {}:{}: `{}`", chat_id, widget_msg_id, err));
-                    tg_send_widget(ANDRIY, report_text, None, None)
-                        .then(move |_res| tg_send_widget(chat_id, TgText::Markdown("сталась помилка".to_owned()), None, None))
-                        .map_ok(|_| ())
-                })
+                .map_err(move |err| format!("widget={} `{}`", widget_msg_id, err))
+        })
+        .or_else(move |err| {
+            let report_text = TgText::Markdown(format!("error in chat={} {}", chat_id, err));
+            tg_send_widget(ANDRIY, report_text, None, None)
+                .then(move |_res| tg_send_widget(chat_id, TgText::Markdown("сталась помилка".to_owned()), None, None))
+                .map_ok(|_| ())
         })
 }
 
@@ -817,11 +821,10 @@ impl From<telegram::TgUpdate> for SeUpdate {
             .and_then(|m| m.get_entities_of_type(TgMessageEntityType::Bold).next())
             .and_then(|h| parse_osm_title(h.as_str()).map(|x| x.to_owned()));
 
-        let osm_info = osm_coords.and_then(|coords| osm_name.map(|name| (name, coords)));
-
         let first_command = upd.message.as_ref().and_then(|m| m.get_entities_of_type(TgMessageEntityType::BotCommand).next());
-        match (first_command, osm_info, upd) {
-            (None, None, telegram::TgUpdate {
+        match (first_command, osm_name, osm_coords, upd) {
+            // Location/venue
+            (None, None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -838,8 +841,8 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 name: venue.map(|v| v.title),
                 msg_id,
             } },
-
-            (None, None, telegram::TgUpdate {
+            // CBQ
+            (None, None, None, telegram::TgUpdate {
                 message: None,
                 callback_query: Some(telegram::TgCallbackQuery {
                     id,
@@ -851,8 +854,8 @@ impl From<telegram::TgUpdate> for SeUpdate {
                     data: Some(data),
                 }),
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::CBQ {id, msg_id, data} },
-
-            (None, None, telegram::TgUpdate {
+            // Text from user
+            (None, None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -863,8 +866,8 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Text(text) },
-
-            (None, Some((name, (latitude, longitude))), telegram::TgUpdate {
+            // OSM place card
+            (None, name, Some((latitude, longitude)), telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     message_id: msg_id,
@@ -874,10 +877,10 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat {
-                chat_id, user, update: SeUpdateVariant::Place{latitude, longitude, name: Some(name), msg_id}
+                chat_id, user, update: SeUpdateVariant::Place{latitude, longitude, name, msg_id}
             },
-
-            (Some(cmd), None, telegram::TgUpdate {
+            // Command
+            (Some(cmd), None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
                     chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
@@ -887,8 +890,8 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 }),
                 callback_query: None,
             }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
-
-            (_, _, u) => SeUpdate::Other(u),
+            // Other
+            (_, _, _, u) => SeUpdate::Other(u),
         }
     }
 }
