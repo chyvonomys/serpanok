@@ -1,3 +1,4 @@
+#![recursion_limit="256"]
 use std::io::Read;
 use std::sync::Arc;
 use chrono::{Datelike, Timelike, TimeZone};
