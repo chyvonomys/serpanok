@@ -512,7 +512,7 @@ pub fn daily_forecast_stream(
     stream::iter(daily_iterator(chrono::Utc::now(), sendh, targeth, tz))
         .then(move |(at, target)| {
             let dur = (at - chrono::Utc::now()).to_std().unwrap_or_default();
-            tokio::time::delay_for(dur)
+            tokio::time::sleep(dur)
                 .then({ let log = log.clone(); move |()|
                     forecast_stream(log, lat, lon, target, source, params)
                         .into_future()

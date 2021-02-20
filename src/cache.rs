@@ -5,7 +5,7 @@ use crate::grib;
 use std::sync::Arc;
 use lazy_static::*;
 use serde_derive::Serialize;
-use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
+use futures::{future, Future, FutureExt, TryFutureExt};
 
 struct CacheEntry(String);
 
@@ -34,9 +34,9 @@ fn pickup_disk_cache() -> DiskCache<FileKey> {
     Arc::new(std::sync::Mutex::new(hm))
 }
 
-type SharedFut<T> = future::Shared<Box<
-    dyn Future<Output=Result<Arc<T>, String>> + Unpin + Send
->>;
+type SharedFut<T> = future::Shared<std::pin::Pin<Box<
+    dyn Future<Output=Result<Arc<T>, String>> + Send
+>>>;
 
 pub type MemCache<K, V> = Arc<std::sync::Mutex<std::collections::HashMap<
     K,
@@ -107,7 +107,7 @@ pub fn fetch_grid(
         .lock()
         .unwrap()
         .entry(file_key.clone())
-        .or_insert_with(move || (chrono::Utc::now(), make_fetch_grid_fut(log, file_key).shared()))
+        .or_insert_with(move || (chrono::Utc::now(), make_fetch_grid_fut(log, file_key).boxed().shared()))
         .1
         .clone()
         .map_ok(|x| { let xd: &Arc<grib::GribMessage> = &x; xd.clone() })
@@ -163,9 +163,9 @@ fn parse_grib2(bytes: &[u8]) -> impl Future<Output=Result<(grib::GribMessage, us
     future::ready(res) // TODO:
 }
 
-fn download_grid_fut(
+async fn download_grid_fut(
     log: Arc<TaggedLog>, data_file: Box<dyn DataFile>
-) -> impl Future<Output=Result<Vec<u8>, String>> {
+) -> Result<Vec<u8>, String> {
 
     let from = data_file.available_from();
     let to = data_file.available_to();
@@ -186,35 +186,28 @@ fn download_grid_fut(
     let res: Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> =
         action.ok_or_else(|| "file is no longer available".to_owned());
 
-    future::ready(res)
-        .and_then(move |(from, to)| {
+    let (from, to) = res?;
 
-            let attempt_schedule = (0..)
-                .map(move |i| from + chrono::Duration::minutes(i * 10))
-                .take_while(move |t| *t < to);
+    let attempt_schedule = (0..)
+        .map(move |i| from + chrono::Duration::minutes(i * 10))
+        .take_while(move |t| *t < to);
 
-            let data_file = Arc::new(data_file);
+    let data_file = Arc::new(data_file);
 
-            stream::iter(attempt_schedule)
-                .then({ let log = log.clone(); move |t| {
-                    let now = chrono::Utc::now();
-                    log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339_debug(), now.to_rfc3339_debug()));
-                    
-                    if t > now {
-                        tokio::time::delay_for((t - now).to_std().unwrap()).left_future()
-                    } else {
-                        future::ready( () ).right_future()
-                    }
-                    .then({
-                        let log = log.clone(); let data_file = data_file.clone();
-                        move |()| data_file.fetch_bytes(log)
-                    })
-                }})
-                .inspect_err(move |e| log.add_line(&format!("attempt stream err: {}", e)))
-                .filter_map(|item: Result<Vec<u8>, String>| future::ready(item.ok()))
-                .into_future()
-                .then(|x: (Option<Vec<u8>>, _)| future::ready(x.0.ok_or_else(|| "give up, file did not appear".to_owned())))
-        })
+    for t in attempt_schedule {
+        let now = chrono::Utc::now();
+        log.add_line(&format!("wait until: {}, now: {}", t.to_rfc3339_debug(), now.to_rfc3339_debug()));
+
+        if t > now {
+            let _ = tokio::time::sleep((t - now).to_std().unwrap()).await;
+        }
+        match data_file.fetch_bytes(log.clone()).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => log.add_line(&format!("attempt stream err: {}", e)),
+        }
+    }
+
+    Err("give up, file did not appear".to_owned())
 }
 
 fn make_avail_grid_fut(
@@ -239,9 +232,9 @@ fn make_avail_grid_fut(
     Box::new(fut)
 }
 
-pub fn make_fetch_grid_fut(
+pub async fn make_fetch_grid_fut(
     log: Arc<TaggedLog>, file_key: FileKey
-) -> Box<dyn Future<Output=Result<Arc<grib::GribMessage>, String>> + Send + Unpin> {
+) -> Result<Arc<grib::GribMessage>, String> {
     use std::io::Read;
 
     let data_file = file_key.build_data_file();
@@ -263,7 +256,7 @@ pub fn make_fetch_grid_fut(
     // TODO: do this to make sure lazy init (pickup) occurs before any new file saves.
     let _res = DISK_CACHE.lock().map_err(|e| e.to_string()).map(|_| ());
 
-    let fut = future::ready(res) // TODO:
+    let grib2 = future::ready(res) // TODO:
         .or_else(move |e: String| {
             let log = log.clone();
             log.add_line(&format!("cache miss: {}", &e));
@@ -282,9 +275,9 @@ pub fn make_fetch_grid_fut(
                     log.add_line(&format!("save to cache: {:?}", res));
                     v
                 })
-        })
-        .and_then(|grib2: Vec<u8>| parse_grib2(&grib2))
-        .map_ok(|(g, _)| Arc::new(g));
+        }).await?;
 
-    Box::new(fut)
+    let (g, _) = parse_grib2(&grib2).await?;
+
+    Ok(Arc::new(g))
 }

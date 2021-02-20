@@ -36,10 +36,10 @@ pub fn monitor_weather_wrap(sub: Sub, tz: chrono_tz::Tz) -> Box<dyn Future<Outpu
             data::forecast_stream(log.clone(), sub.latitude, sub.longitude, target_time, sub.source, sub.params)
                 .take(1000).boxed(),
         Mode::Debug(n, d) =>
-            tokio::time::interval_at(
+            tokio_stream::wrappers::IntervalStream::new(tokio::time::interval_at(
                 tokio::time::Instant::now() + tokio::time::Duration::from_secs(d),
                 tokio::time::Duration::from_secs(d)
-            ).map(|_x| Ok(data::Forecast{
+            )).map(|_x| Ok(data::Forecast{
                 temperature: None, time: (chrono::Utc::now(), chrono::Utc::now()),
                 rain_accum: None, snow_accum: None, snow_depth: None, total_cloud_cover: None,
                 wind_speed: None, rel_humidity: None, pressure_msl: None

@@ -268,7 +268,7 @@ fn avail_url(log: Arc<TaggedLog>, url: String) -> impl Future<Output=Result<(), 
 }
 
 lazy_static! {
-    static ref HTTP_CLIENT: hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body> = hyper::Client::builder()
+    static ref HTTP_CLIENT: hyper::client::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body> = hyper::client::Client::builder()
         .build::<_, hyper::Body>(hyper_tls::HttpsConnector::new());
 }
 
@@ -533,7 +533,7 @@ fn serpanok_api(
 fn forward_updates(url: String, interval: u64) -> impl Future<Output=()> {
     stream::iter(0..)
         .then(move |_i|
-            tokio::time::delay_for(std::time::Duration::from_secs(interval)).map(Ok)
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).map(Ok)
         )
         .try_fold(None, move |last_id, ()|
             telegram::get_updates(last_id)
@@ -596,11 +596,13 @@ fn main() {
     let mem_int = clmatches.value_of("mem_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(60);
     let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(300);
 
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.handle().clone();
     let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
 
-    let join_handle = rt.enter(|| {
+    let join_handle = {
+        let _guard = rt.enter();
+        
         let new_service = hyper::service::make_service_fn({
             let exec = exec.clone();
             move |_| {
@@ -612,11 +614,11 @@ fn main() {
     
         let server = hyper::Server::bind(&bind_addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
         println!("Starting server: http://{}/", bind_addr);
-        let purge_mem_cache = tokio::time::interval(std::time::Duration::from_secs(mem_int))
+        let purge_mem_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(mem_int)))
             .map(|_| cache::purge_mem_cache())
             .fold((), |_, _| future::ready( () ));
     
-        let purge_disk_cache = tokio::time::interval(std::time::Duration::from_secs(disk_int))
+        let purge_disk_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(disk_int)))
             .map(|_| cache::purge_disk_cache())
             .fold((), |_, _| future::ready( () ));
     
@@ -629,7 +631,7 @@ fn main() {
         }
 
         shutdown_rx.map(|_| ())
-    });
+    };
 
     rt.block_on(join_handle);
     shutdown_tx.send( () ).unwrap()
