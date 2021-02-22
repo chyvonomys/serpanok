@@ -520,3 +520,80 @@ pub fn daily_forecast_stream(
                 })
         })
 }
+
+pub struct Rates {
+    pub label: String,
+    pub usd_buy: f32,
+    pub usd_sell: f32,
+    pub eur_buy: f32,
+    pub eur_sell: f32,
+}
+
+use select;
+use select::predicate::{Name, Class};
+use super::fetch_url;
+
+static RULYAURL: &'static str = "http://rulya-bank.com.ua";
+
+pub async fn rulya_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
+    let bytes: Vec<u8> = fetch_url(log, RULYAURL.to_owned(), &[]).await?;
+
+    if let Ok(document) = select::document::Document::from_read(bytes.as_slice()) {
+        if let Some(div2) = document.find(Class("col-md-3")).take(1).next() {
+            if let Some(center) = div2.find(Name("center")).take(1).next() {
+                let label = center.text();
+
+                let rates: Vec<f32> = div2.find(Class("tbl"))
+                    .take(4)
+                    .filter_map(|e| e.text().parse().ok())
+                    .collect();
+
+                if rates.len() == 4 {
+                    let rates = Rates{label, usd_buy: rates[0], usd_sell: rates[1], eur_buy: rates[2], eur_sell: rates[3]};
+                    return Ok(rates);
+                }
+            }
+        }
+    }
+    Err("could not parse rulya page".to_owned())
+}
+
+pub async fn piramida_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
+    Err("not implemeted piramida".to_owned())
+}
+
+async fn poll_exchange_rate_impl(
+    secs: u64, log: Arc<TaggedLog>,
+) -> Result<std::convert::Infallible, String> {
+
+    let conn = rusqlite::Connection::open("exchange.db")
+        .map_err(|e| e.to_string())?;
+
+    let _c = conn.execute(
+        "CREATE TABLE IF NOT EXISTS rulya_usd(\
+time TEXT NOT NULL PRIMARY KEY,\
+buy FLOAT NOT NULL,\
+sell FLOAT NOT NULL)",
+        rusqlite::NO_PARAMS,
+    )
+        .map_err(|e| e.to_string())?;
+
+    loop {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let rulya = rulya_fetch_rates(log.clone()).await?;
+        let _i = conn.execute(
+            "INSERT INTO rulya_usd(time, buy, sell) VALUES(?1, ?2, ?3)",
+            &[now, rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
+        )
+            .map_err(|e| e.to_string())?;
+        let _x = tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
+}
+
+pub async fn poll_exchange_rate(secs: u64) {
+    let log = Arc::new(TaggedLog {tag: "poll_exch".to_owned()});
+
+    if let Err(e) = poll_exchange_rate_impl(secs, log.clone()).await {
+        log.add_line(&e);
+    }
+}

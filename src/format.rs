@@ -115,3 +115,56 @@ pub fn format_forecast(name: &Option<String>, lat: f32, lon: f32, f: &data::Fore
     }
     ForecastText(result)
 }
+
+use plotters::prelude::*;
+
+pub fn format_exchange_graph(
+    rs: &[(chrono::DateTime::<chrono::Utc>, u32, u32)],
+    from: &chrono::DateTime::<chrono::Utc>,
+    to: &chrono::DateTime::<chrono::Utc>,
+) -> Result<String, String> {
+    let min_buy = rs.iter().map(|x| x.1).min().unwrap_or(0);
+    let min_sell = rs.iter().map(|x| x.2).min().unwrap_or(0);
+    let max_buy = rs.iter().map(|x| x.1).max().unwrap_or(3000);
+    let max_sell = rs.iter().map(|x| x.2).max().unwrap_or(3000);
+
+    let min = std::cmp::min(min_buy, min_sell) as f32 / 100.0;
+    let max = std::cmp::max(max_buy, max_sell) as f32 / 100.0;
+
+    let max_pad = max + 0.1 * (max - min);
+    let min_pad = min - 0.1 * (max - min);
+
+    let filename = format!("plot-{}.png", chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false));
+    {
+        let root = BitMapBackend::new(&filename, (200, 100)).into_drawing_area();
+        root.fill(&RGBColor(255, 255, 240));
+        let mut chart = ChartBuilder::on(&root)
+            .x_label_area_size(20)
+            .y_label_area_size(30)
+            .build_cartesian_2d(*from..*to, min_pad..max_pad)
+            .map_err(|e| e.to_string())?;
+
+        chart
+            .configure_mesh()
+            .light_line_style(BLACK.mix(0.0).filled())
+            .x_labels(5)
+            .y_labels(5)
+            .x_label_formatter(&|dt: &chrono::DateTime::<chrono::Utc>| format!("{}:{}", dt.hour(), dt.minute()))
+            .draw()
+            .map_err(|e| e.to_string())?;
+
+        chart
+            .draw_series(LineSeries::new(
+                rs.iter().map(|x| (x.0, x.1 as f32 * 0.01)),
+                &RGBColor(20, 20, 200),
+            ))
+            .map_err(|e| e.to_string())?;
+        chart
+            .draw_series(LineSeries::new(
+                rs.iter().map(|x| (x.0, x.2 as f32 * 0.01)),
+                &RGBColor(20, 200, 20),
+            ))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(filename)
+}

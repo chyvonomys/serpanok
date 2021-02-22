@@ -162,6 +162,20 @@ trait DataFile: Send + Sync {
     fn check_avail(&self, log: std::sync::Arc<TaggedLog>) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin>;
 }
 
+enum ExchangeSource {
+    Rulya,
+    Piramida,
+}
+
+impl ExchangeSource {
+    async fn fetch_rates(self, log: std::sync::Arc<TaggedLog>) -> Result<data::Rates, String> {
+        match self {
+            ExchangeSource::Rulya => data::rulya_fetch_rates(log).await,
+            ExchangeSource::Piramida => data::piramida_fetch_rates(log).await,
+        }
+    }
+}
+
 mod grib;
 mod telegram;
 mod ui;
@@ -583,6 +597,10 @@ fn main() {
             .short("d").takes_value(true).default_value("300")
             .help("Disk cache purge interval (seconds)")
         )
+        .arg(clap::Arg::with_name("exch_int")
+            .short("e").takes_value(true).default_value("900")
+            .help("Exchange rate fetch interval (seconds)")
+        )
         .get_matches();
     
     use std::str::FromStr;
@@ -594,7 +612,8 @@ fn main() {
     let poll_mode = clmatches.is_present("poll_mode");
     let poll_int = clmatches.value_of("poll_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(2);
     let mem_int = clmatches.value_of("mem_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(60);
-    let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(300);
+    let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(5 * 60);
+    let exch_int = clmatches.value_of("exch_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(15 * 60);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.handle().clone();
@@ -625,6 +644,7 @@ fn main() {
         exec.spawn(server.map(|_| ()));
         exec.spawn(purge_mem_cache);
         exec.spawn(purge_disk_cache);
+        exec.spawn(data::poll_exchange_rate(exch_int));
     
         if poll_mode {
             exec.spawn(forward_updates(format!("http://{}/bot", bind_addr), poll_int));

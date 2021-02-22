@@ -25,3 +25,6 @@ serde_derive = "1.0"
 regex = "1.3"
 clap = "2.33"
 bitflags = "1.2"
+select = "0.5"
+plotters = {version = "0.3", default_features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "datetime", "chrono"]}
+rusqlite = "0.24"

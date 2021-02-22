@@ -1,7 +1,7 @@
 use crate::telegram;
 use crate::format;
 use crate::data;
-use super::{TaggedLog, DataSource, lookup_tz};
+use super::{TaggedLog, DataSource, ExchangeSource, lookup_tz};
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -686,6 +686,33 @@ fn process_widget(chat_id: i64, lat: f32, lon: f32, source: DataSource, name: Op
         })
 }
 
+async fn process_graph_widget(chat_id: i64, source: ExchangeSource) -> Result<(), String> {
+
+    let log = Arc::new(TaggedLog {tag: format!("{}:.", chat_id)});
+    let rates = source.fetch_rates(log).await?;
+    let text = format!("{}:\nUSD: {}/{}\nEUR: {}/{}", rates.label,
+                       rates.usd_buy, rates.usd_sell,
+                       rates.eur_buy, rates.eur_sell,
+    );
+/*
+    let rs = vec![
+        (chrono::Utc::now() - chrono::Duration::minutes(5 * 15), 2775, 2795),
+        (chrono::Utc::now() - chrono::Duration::minutes(4 * 15), 2775, 2794),
+        (chrono::Utc::now() - chrono::Duration::minutes(3 * 15), 2775, 2799),
+        (chrono::Utc::now() - chrono::Duration::minutes(2 * 15), 2775, 2799),
+        (chrono::Utc::now() - chrono::Duration::minutes(1 * 15), 2799, 2804),
+        (chrono::Utc::now() - chrono::Duration::minutes(0 * 15), 2800, 2806),
+    ];
+    let file = format::format_exchange_graph(
+        &rs,
+        &(chrono::Utc::now() - chrono::Duration::minutes(6 * 15)),
+        &(chrono::Utc::now() + chrono::Duration::minutes(15)))?;
+    let text = file;
+*/
+    let _msg_id = tg_send_widget(chat_id, TgText::Plain(text), None, None).await?;
+    Ok( () )
+}
+
 pub fn process_update(tgu: telegram::TgUpdate) -> impl Future<Output=Result<(), String>> {
     process_bot(SeUpdate::from(tgu))
 }
@@ -711,33 +738,35 @@ static PADDING_BTN_MSG: &str = "недоcтупна опція";
 // TODO2:  what if user blocks bot?
 
 // NOTE: allow only private chat communication for now
-fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Send + Unpin> {
+async fn process_bot(upd: SeUpdate) -> Result<(), String> {
     match upd {
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
-                    "/start" => Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ())),
-                    "/debug" => Box::new(process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned()))),
-                    _ => Box::new(tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ())),
+                    "/start" => tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ()).await,
+                    "/debug" => process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned())).await,
+                    "/rulya" => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
+                    "/piramida" => process_graph_widget(chat_id, ExchangeSource::Piramida).await,
+                    _ => tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ()).await,
                 },
             SeUpdateVariant::Place {latitude, longitude, name, ..} =>
                 if let Some(source) = DataSource::from_latlon(latitude, longitude) {
-                    Box::new(process_widget(chat_id, latitude, longitude, source, name))
+                    process_widget(chat_id, latitude, longitude, source, name).await
                 } else {
-                    Box::new(tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()))
+                    tg_send_widget(chat_id, TgText::Plain(WRONG_LOCATION_MSG.to_owned()), None, None).map_ok(|_| ()).await
                 }
             SeUpdateVariant::CBQ {id, msg_id, data} =>
                 if data == PADDING_DATA { // TODO: this is wrong place to check this
-                    Box::new(tg_answer_cbq(id, Some(PADDING_BTN_MSG.to_owned()))
-                             .map_err(|e| format!("answer stub cbq error: {}", e)))
+                    tg_answer_cbq(id, Some(PADDING_BTN_MSG.to_owned()))
+                             .map_err(|e| format!("answer stub cbq error: {}", e)).await
                 } else {
                     // push choice into channel for (chat, msg_id) conversation
                     let ok = UserClick::click(chat_id, msg_id, data)
                         .map_err(|e| println!("cbq(click) {}:{} error: {}", chat_id, msg_id, e))
                         .is_ok();
 
-                    Box::new(tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
-                             .map_err(|e| format!("answer cbq error: {}", e)))
+                    tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
+                             .map_err(|e| format!("answer cbq error: {}", e)).await
                 },
             SeUpdateVariant::Text(text) => {
                 let ok = UserInput::input(chat_id, text)
@@ -745,14 +774,14 @@ fn process_bot(upd: SeUpdate) -> Box<dyn Future<Output=Result<(), String>> + Sen
                     .is_ok();
 
                 if ok {
-                    Box::new(future::ok( () ))
+                    Ok( () )
                 } else {
-                    Box::new(tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_m| () ))
+                    tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_m| () ).await
                 }
             },
         },            
         SeUpdate::Other(update) =>
-            Box::new(tg_send_widget(ANDRIY, TgText::Plain(format!("unsupported update:\n{:#?}", update)), None, None).map_ok(|_| ())),
+            tg_send_widget(ANDRIY, TgText::Plain(format!("unsupported update:\n{:#?}", update)), None, None).map_ok(|_| ()).await,
     }
 }
 
