@@ -574,7 +574,7 @@ async fn poll_exchange_rate_impl(
 time TEXT NOT NULL PRIMARY KEY,\
 buy FLOAT NOT NULL,\
 sell FLOAT NOT NULL)",
-        rusqlite::NO_PARAMS,
+        [],
     )
         .map_err(|e| e.to_string())?;
 
@@ -583,7 +583,7 @@ sell FLOAT NOT NULL)",
         let rulya = rulya_fetch_rates(log.clone()).await?;
         let _i = conn.execute(
             "INSERT INTO rulya_usd(time, buy, sell) VALUES(?1, ?2, ?3)",
-            &[now, rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
+            [now, rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
         )
             .map_err(|e| e.to_string())?;
         let _x = tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
