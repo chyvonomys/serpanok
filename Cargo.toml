@@ -28,3 +28,6 @@ bitflags = "1.2"
 select = "0.5"
 plotters = {version = "0.3", default_features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "datetime", "chrono"]}
 rusqlite = {version = "0.28", features = ["bundled"]}
+
+[build-dependencies]
+cmake = "=0.1.45"
