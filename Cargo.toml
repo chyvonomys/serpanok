@@ -27,4 +27,4 @@ clap = "3.1"
 bitflags = "1.2"
 select = "0.5"
 plotters = {version = "0.3", default_features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "datetime", "chrono"]}
-rusqlite = "0.27"
+rusqlite = {version = "0.28", features = ["bundled"]}

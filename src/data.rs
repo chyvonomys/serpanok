@@ -558,10 +558,6 @@ pub async fn rulya_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
     Err("could not parse rulya page".to_owned())
 }
 
-pub async fn piramida_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
-    Err("not implemeted piramida".to_owned())
-}
-
 async fn poll_exchange_rate_impl(
     secs: u64, log: Arc<TaggedLog>,
 ) -> Result<std::convert::Infallible, String> {

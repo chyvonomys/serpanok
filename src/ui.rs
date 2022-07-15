@@ -1,7 +1,7 @@
 use crate::telegram;
 use crate::format;
 use crate::data;
-use super::{TaggedLog, DataSource, ExchangeSource, lookup_tz};
+use super::{Features, TaggedLog, DataSource, ExchangeSource, lookup_tz};
 use futures::{future, Future, FutureExt, TryFutureExt, stream, StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -690,7 +690,7 @@ async fn process_graph_widget(chat_id: i64, source: ExchangeSource) -> Result<()
 
     let log = Arc::new(TaggedLog {tag: format!("{}:.", chat_id)});
     let rates = source.fetch_rates(log).await?;
-    let text = format!("{}:\nUSD: {}/{}\nEUR: {}/{}", rates.label,
+    let text = format!("{}:\nUSD: {:.2}/{:.2}\nEUR: {:.2}/{:.2}", rates.label,
                        rates.usd_buy, rates.usd_sell,
                        rates.eur_buy, rates.eur_sell,
     );
@@ -713,8 +713,8 @@ async fn process_graph_widget(chat_id: i64, source: ExchangeSource) -> Result<()
     Ok( () )
 }
 
-pub fn process_update(tgu: telegram::TgUpdate) -> impl Future<Output=Result<(), String>> {
-    process_bot(SeUpdate::from(tgu))
+pub fn process_update(tgu: telegram::TgUpdate, features: Features) -> impl Future<Output=Result<(), String>> {
+    process_bot(SeUpdate::from(tgu), features)
 }
 
 static ANDRIY: i64 = 54_462_285;
@@ -726,6 +726,24 @@ static USAGE_MSG: &str = "\u{1F4A1} цей бот вміє відстежува�
 `     `(меню \u{1F4CE} в мобільному додатку)\n\
 \u{1F5FA} *по назві місця*\n\
 `     `(ввести `@osmbot <назва>` і вибрати з списку)";
+
+static EXCH_USAGE_MSG: &str = "kurs valut rulya bank: /rulya";
+
+fn build_start_message(features: Features) -> String {
+    let mut msg = String::new();
+    if features.weather {
+        msg.push_str(USAGE_MSG);
+    }
+
+    if features.exchange {
+        if msg.len() > 0 {
+            msg.push_str("\n\n");
+        }
+        msg.push_str(EXCH_USAGE_MSG);
+    }
+    msg
+}
+
 static WRONG_LOCATION_MSG: &str = "невірні координати місця";
 static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
 static CBQ_ERROR_MSG: &str = "помилка";
@@ -738,15 +756,14 @@ static PADDING_BTN_MSG: &str = "недоcтупна опція";
 // TODO2:  what if user blocks bot?
 
 // NOTE: allow only private chat communication for now
-async fn process_bot(upd: SeUpdate) -> Result<(), String> {
+async fn process_bot(upd: SeUpdate, features: Features) -> Result<(), String> {
     match upd {
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
-                    "/start" => tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ()).await,
-                    "/debug" => process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned())).await,
-                    "/rulya" => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
-                    "/piramida" => process_graph_widget(chat_id, ExchangeSource::Piramida).await,
+                    "/start" => tg_send_widget(chat_id, TgText::Markdown(build_start_message(features)), None, None).map_ok(|_| ()).await,
+                    "/debug" if chat_id == ANDRIY => process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned())).await,
+                    "/rulya" if features.exchange => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
                     _ => tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ()).await,
                 },
             SeUpdateVariant::Place {latitude, longitude, name, ..} =>
@@ -774,12 +791,20 @@ async fn process_bot(upd: SeUpdate) -> Result<(), String> {
                     .is_ok();
 
                 if ok {
-                    Ok( () )
+                    Ok(())
                 } else {
                     tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_m| () ).await
                 }
             },
-        },            
+        },
+        SeUpdate::GroupChat {chat_id, update, ..} => match update {
+            SeUpdateVariant::Command(cmd) =>
+                match cmd.as_str() {
+                    "/rulya" if features.exchange => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
+                    _ => tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ()).await,
+                },
+            _ => Ok(()), // Do nothing, we only support commands 
+        },
         SeUpdate::Other(update) =>
             tg_send_widget(ANDRIY, TgText::Plain(format!("unsupported update:\n{:#?}", update)), None, None).map_ok(|_| ()).await,
     }
@@ -790,6 +815,11 @@ async fn process_bot(upd: SeUpdate) -> Result<(), String> {
 #[derive(Debug)]
 enum SeUpdate {
     PrivateChat {
+        chat_id: i64,
+        user: telegram::TgUser,
+        update: SeUpdateVariant,
+    },
+    GroupChat {
         chat_id: i64,
         user: telegram::TgUser,
         update: SeUpdateVariant,
@@ -909,16 +939,23 @@ impl From<telegram::TgUpdate> for SeUpdate {
                 chat_id, user, update: SeUpdateVariant::Place{latitude, longitude, name, msg_id}
             },
             // Command
-            (Some(cmd), None, None, telegram::TgUpdate {
+            (Some(cmd_full), None, None, telegram::TgUpdate {
                 message: Some(telegram::TgMessage {
                     from: Some(user),
-                    chat: telegram::TgChat {id: chat_id, type_: telegram::TgChatType::Private},
+                    chat: telegram::TgChat {id: chat_id, type_: chat_type},
                     entities: Some(_),
                     location: None,
                     ..
                 }),
                 callback_query: None,
-            }) => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
+            }) => {
+                // remove trailing @botname
+                let cmd = cmd_full.split('@').next().unwrap_or("/start").to_owned();
+                match chat_type {
+                    telegram::TgChatType::Private => SeUpdate::PrivateChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
+                    _ => SeUpdate::GroupChat { chat_id, user, update: SeUpdateVariant::Command(cmd) },
+                }
+            },
             // Other
             (_, _, _, u) => SeUpdate::Other(u),
         }

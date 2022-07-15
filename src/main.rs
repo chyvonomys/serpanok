@@ -164,14 +164,12 @@ trait DataFile: Send + Sync {
 
 enum ExchangeSource {
     Rulya,
-    Piramida,
 }
 
 impl ExchangeSource {
     async fn fetch_rates(self, log: std::sync::Arc<TaggedLog>) -> Result<data::Rates, String> {
         match self {
             ExchangeSource::Rulya => data::rulya_fetch_rates(log).await,
-            ExchangeSource::Piramida => data::piramida_fetch_rates(log).await,
         }
     }
 }
@@ -323,8 +321,15 @@ where T: Into<hyper::Body> {
     hyper::Response::builder().status(code).header("Content-Type", ct).body(t.into()).unwrap()
 }
 
+#[derive(Clone, Copy)]
+pub struct Features {
+    pub weather: bool,
+    pub exchange: bool,
+}
+
 fn serpanok_api(
     exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>,
+    features: Features,
 ) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send + Unpin> {
     println!("request: {} {}", req.method(), req.uri());
     let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
@@ -338,7 +343,7 @@ fn serpanok_api(
                 .and_then(move |body| {
                     match serde_json::from_slice::<telegram::TgUpdate>(&body) {
                         Ok(tgu) => { exec.spawn(
-                            ui::process_update(tgu).map_err(|e| println!("process update error: {}", e)).map(|_| ())
+                            ui::process_update(tgu, features).map_err(|e| println!("process update error: {}", e)).map(|_| ())
                         ); },
                         Err(err) => println!("TgUpdate parse error: {}", err.to_string()),
                     }
@@ -585,6 +590,14 @@ fn main() {
             .short('f')
             .help("Poll Telegram Bot API for updates")
         )
+        .arg(clap::Arg::with_name("enable_weather")
+             .short('W')
+             .help("Enable weather monitoring features")
+        )
+        .arg(clap::Arg::with_name("enable_exchange")
+             .short('E')
+             .help("Enable exchange rate features")
+        )
         .arg(clap::Arg::with_name("poll_int")
             .short('i').takes_value(true).default_value("4")
             .help("Update poll interval (seconds)")
@@ -615,6 +628,11 @@ fn main() {
     let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(5 * 60);
     let exch_int = clmatches.value_of("exch_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(15 * 60);
 
+    let features = Features {
+        weather: clmatches.is_present("enable_weather"),
+        exchange: clmatches.is_present("enable_exchange"),
+    };
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.handle().clone();
     let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
@@ -626,26 +644,32 @@ fn main() {
             let exec = exec.clone();
             move |_| {
                 let exec = exec.clone();
-                let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
+                let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req, features));
                 future::ok::<_, hyper::Error>(sfn)
             }
         });
     
         let server = hyper::Server::bind(&bind_addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
         println!("Starting server: http://{}/", bind_addr);
-        let purge_mem_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(mem_int)))
-            .map(|_| cache::purge_mem_cache())
-            .fold((), |_, _| future::ready( () ));
-    
-        let purge_disk_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(disk_int)))
-            .map(|_| cache::purge_disk_cache())
-            .fold((), |_, _| future::ready( () ));
-    
         exec.spawn(server.map(|_| ()));
-        exec.spawn(purge_mem_cache);
-        exec.spawn(purge_disk_cache);
-        exec.spawn(data::poll_exchange_rate(exch_int));
-    
+
+        if true {
+            let purge_mem_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(mem_int)))
+                .map(|_| cache::purge_mem_cache())
+                .fold((), |_, _| future::ready( () ));
+            
+            let purge_disk_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(disk_int)))
+                .map(|_| cache::purge_disk_cache())
+                .fold((), |_, _| future::ready( () ));
+            
+            exec.spawn(purge_mem_cache);
+            exec.spawn(purge_disk_cache);
+        }
+
+        if features.exchange {
+            exec.spawn(data::poll_exchange_rate(exch_int));
+        }
+
         if poll_mode {
             exec.spawn(forward_updates(format!("http://{}/bot", bind_addr), poll_int));
         }
