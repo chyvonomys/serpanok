@@ -599,14 +599,15 @@ async fn poll_exchange_rate_impl(
     loop {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let rulya = rulya_fetch_rates(log.clone()).await?;
+
         let () = || -> rusqlite::Result<()> {
             let _iru = conn.execute(
                 "INSERT INTO rulya_usd(time, buy, sell) VALUES(?1, ?2, ?3)",
-                &[now.clone(), rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
+                [now.clone(), rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
             )?;
             let _ire = conn.execute(
                 "INSERT INTO rulya_eur(time, buy, sell) VALUES(?1, ?2, ?3)",
-                &[now, rulya.eur_buy.to_string(), rulya.eur_sell.to_string()],
+                [now, rulya.eur_buy.to_string(), rulya.eur_sell.to_string()],
             )?;
             Ok(())
         }().map_err(|e| e.to_string())?;

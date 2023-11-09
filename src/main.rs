@@ -617,40 +617,40 @@ fn forward_updates(url: String, interval: u64) -> impl Future<Output=()> {
 fn main() {
     let clmatches = clap::App::new("serpanok bot")
         .arg(clap::Arg::with_name("bot_token")
-            .short("t").takes_value(true).required(true)
+            .short('t').takes_value(true).required(true)
             .help("Telegram Bot API token (required)")
         )
         .arg(clap::Arg::with_name("bind_addr")
-            .short("a").takes_value(true).default_value("127.0.0.1:8778")
+            .short('a').takes_value(true).default_value("127.0.0.1:8778")
             .help("Address to start HTTP server at")
         )
         .arg(clap::Arg::with_name("poll_mode")
-            .short("f")
+            .short('f')
             .help("Poll Telegram Bot API for updates")
         )
+        .arg(clap::Arg::with_name("enable_weather")
+             .short('W')
+             .help("Enable weather monitoring features")
+        )
+        .arg(clap::Arg::with_name("enable_exchange")
+             .short('E')
+             .help("Enable exchange rate features")
+        )
         .arg(clap::Arg::with_name("poll_int")
-            .short("i").takes_value(true).default_value("4")
+            .short('i').takes_value(true).default_value("4")
             .help("Update poll interval (seconds)")
         )
         .arg(clap::Arg::with_name("mem_int")
-            .short("m").takes_value(true).default_value("60")
+            .short('m').takes_value(true).default_value("60")
             .help("Memory cache purge interval (seconds)")
         )
         .arg(clap::Arg::with_name("disk_int")
-            .short("d").takes_value(true).default_value("300")
+            .short('d').takes_value(true).default_value("300")
             .help("Disk cache purge interval (seconds)")
         )
         .arg(clap::Arg::with_name("exch_int")
-            .short("e").takes_value(true).default_value("900")
+            .short('e').takes_value(true).default_value("900")
             .help("Exchange rate fetch interval (seconds)")
-        )
-        .arg(clap::Arg::with_name("enable_weather")
-             .short("w")
-             .help("Enable weather functionality")
-        )
-        .arg(clap::Arg::with_name("enable_rulya")
-             .short("r")
-             .help("Enable Rulya functionality")
         )
         .get_matches();
     
@@ -667,7 +667,7 @@ fn main() {
     let exch_int = clmatches.value_of("exch_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(15 * 60);
     let features = ui::Features {
         weather: clmatches.is_present("enable_weather"),
-        rulya: clmatches.is_present("enable_rulya"),
+        exchange: clmatches.is_present("enable_exchange"),
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -688,19 +688,25 @@ fn main() {
     
         let server = hyper::Server::bind(&bind_addr).serve(new_service).map_err(|e| println!("hyper error: {}", e));
         println!("Starting server: http://{}/", bind_addr);
-        let purge_mem_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(mem_int)))
-            .map(|_| cache::purge_mem_cache())
-            .fold((), |_, _| future::ready( () ));
-    
-        let purge_disk_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(disk_int)))
-            .map(|_| cache::purge_disk_cache())
-            .fold((), |_, _| future::ready( () ));
-    
         exec.spawn(server.map(|_| ()));
-        exec.spawn(purge_mem_cache);
-        exec.spawn(purge_disk_cache);
-        exec.spawn(data::poll_exchange_rate(exch_int));
-    
+
+        if true {
+            let purge_mem_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(mem_int)))
+                .map(|_| cache::purge_mem_cache())
+                .fold((), |_, _| future::ready( () ));
+            
+            let purge_disk_cache = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(disk_int)))
+                .map(|_| cache::purge_disk_cache())
+                .fold((), |_, _| future::ready( () ));
+            
+            exec.spawn(purge_mem_cache);
+            exec.spawn(purge_disk_cache);
+        }
+
+        if features.exchange {
+            exec.spawn(data::poll_exchange_rate(exch_int));
+        }
+
         if poll_mode {
             exec.spawn(forward_updates(format!("http://{}/bot", bind_addr), poll_int));
         }
