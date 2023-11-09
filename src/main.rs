@@ -164,14 +164,12 @@ trait DataFile: Send + Sync {
 
 enum ExchangeSource {
     Rulya,
-    Piramida,
 }
 
 impl ExchangeSource {
     async fn fetch_rates(self, log: std::sync::Arc<TaggedLog>) -> Result<data::Rates, String> {
         match self {
             ExchangeSource::Rulya => data::rulya_fetch_rates(log).await,
-            ExchangeSource::Piramida => data::piramida_fetch_rates(log).await,
         }
     }
 }
@@ -234,6 +232,51 @@ fn http_post_json(url: String, json: String) -> impl Future<Output=Result<(bool,
         .request(req)
         .map_err(move |e| format!("POST {} failed: {}", url, e))
         .and_then(fold_response_body)
+}
+
+enum FormData {
+    Field{name: &'static str, value: String},
+    File{name: &'static str, filename: String, mime: &'static str, base64: String},
+}
+
+impl FormData {
+    fn append_to_body(&self, body: &mut String) {
+        match self {
+            FormData::Field{name, value} => {
+                body.push_str(&format!("Content-Disposition: form-data; name=\"{}\"\r\n", name));
+                body.push_str("\r\n");
+                body.push_str(&value);
+                body.push_str("\r\n");
+            },
+            FormData::File{name, filename, mime, base64} => {
+                body.push_str(&format!("Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n", name, filename));
+                body.push_str(&format!("Content-Type: {}\r\n", mime));
+                body.push_str("Content-Transfer-Encoding: base64\r\n");
+                body.push_str("\r\n");
+                body.push_str(&base64);
+                body.push_str("\r\n");
+            },
+        }
+    }
+}
+
+async fn http_post_formdata(url: String, data: &[FormData]) -> Result<(bool, Vec<u8>), String> {
+    let mut body = String::new();
+    for d in data {
+        body.push_str("-----BOUNDARY\r\n");
+        d.append_to_body(&mut body);
+    }
+    body.push_str("-----BOUNDARY--\r\n");
+    let req = hyper::Request::post(&url)
+        .header(hyper::header::CONTENT_TYPE, "multipart/form-data; boundary=---BOUNDARY")
+        .body(hyper::Body::from(body))
+        .expect("POST request build failed");
+
+    HTTP_CLIENT
+        .request(req)
+        .map_err(move |e| format!("POST {} failed: {}", url, e))
+        .and_then(fold_response_body)
+        .await
 }
 
 fn http_get(url: String, hs: &[(&str, &str)]) -> impl Future<Output=Result<(bool, Vec<u8>), String>> {
@@ -324,7 +367,7 @@ where T: Into<hyper::Body> {
 }
 
 fn serpanok_api(
-    exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>,
+    exec: tokio::runtime::Handle, req: hyper::Request<hyper::Body>, fs: ui::Features
 ) -> Box<dyn Future<Output=Result<hyper::Response<hyper::Body>, hyper::Error>> + Send + Unpin> {
     println!("request: {} {}", req.method(), req.uri());
     let query: &[u8] = req.uri().query().unwrap_or("").as_bytes();
@@ -338,7 +381,7 @@ fn serpanok_api(
                 .and_then(move |body| {
                     match serde_json::from_slice::<telegram::TgUpdate>(&body) {
                         Ok(tgu) => { exec.spawn(
-                            ui::process_update(tgu).map_err(|e| println!("process update error: {}", e)).map(|_| ())
+                            ui::process_update(tgu, fs).map_err(|e| println!("process update error: {}", e)).map(|_| ())
                         ); },
                         Err(err) => println!("TgUpdate parse error: {}", err.to_string()),
                     }
@@ -601,6 +644,14 @@ fn main() {
             .short("e").takes_value(true).default_value("900")
             .help("Exchange rate fetch interval (seconds)")
         )
+        .arg(clap::Arg::with_name("enable_weather")
+             .short("w")
+             .help("Enable weather functionality")
+        )
+        .arg(clap::Arg::with_name("enable_rulya")
+             .short("r")
+             .help("Enable Rulya functionality")
+        )
         .get_matches();
     
     use std::str::FromStr;
@@ -614,6 +665,10 @@ fn main() {
     let mem_int = clmatches.value_of("mem_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(60);
     let disk_int = clmatches.value_of("disk_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(5 * 60);
     let exch_int = clmatches.value_of("exch_int").and_then(|s| str::parse::<u64>(s).ok()).unwrap_or(15 * 60);
+    let features = ui::Features {
+        weather: clmatches.is_present("enable_weather"),
+        rulya: clmatches.is_present("enable_rulya"),
+    };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let exec = rt.handle().clone();
@@ -626,7 +681,7 @@ fn main() {
             let exec = exec.clone();
             move |_| {
                 let exec = exec.clone();
-                let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req));
+                let sfn = hyper::service::service_fn(move |req| serpanok_api(exec.clone(), req, features));
                 future::ok::<_, hyper::Error>(sfn)
             }
         });

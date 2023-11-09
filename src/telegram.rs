@@ -1,5 +1,5 @@
 use serde_derive::{Serialize, Deserialize};
-use super::{http_get, http_post_json};
+use super::{http_get, http_post_json, http_post_formdata, FormData};
 use futures::{future, Future, TryFutureExt};
 
 lazy_static::lazy_static! {
@@ -189,6 +189,19 @@ pub struct TgMessageUltraLite {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct TgPhotoSize {
+    pub file_id: String,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TgMessagePhoto {
+    pub message_id: i32,
+    pub photo: Vec<TgPhotoSize>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct TgCallbackQuery {
     pub id: String,
     pub from: TgUser,
@@ -210,6 +223,20 @@ pub struct TgSendMsg {
     #[serde(skip_serializing_if = "Option::is_none")] pub parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub reply_markup: Option<TgInlineKeyboardMarkup>,
     pub disable_web_page_preview: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum TgPhoto {
+    FileId(String),
+    PngBase64(String),
+}
+
+#[derive(Serialize)]
+pub struct TgSendPhoto {
+    pub chat_id: i64,
+    pub photo: TgPhoto,
+    pub caption: String,
 }
 
 #[derive(Serialize)]
@@ -291,4 +318,15 @@ where S: serde::Serialize, R: serde::de::DeserializeOwned {
                 .map_err(|e| TgCallError::JsonError(e.to_string()))
                 .and_then(|resp| resp.into_result().map_err(TgCallError::ApiError))
         ))
+}
+
+pub async fn tg_call_formdata<S, R>(call: &'static str, payload: S) -> Result<R, TgCallError>
+where S: Into<Vec<FormData>>, R: serde::de::DeserializeOwned {
+    let url = format!("https://api.telegram.org/bot{}/{}", BOTTOKEN.as_str(), call);
+    let formdata = payload.into();
+    let (_ok, body) = http_post_formdata(url, &formdata).map_err(TgCallError::PostError).await?;
+
+    serde_json::from_reader::<_, TgResponse<R>>(std::io::Cursor::new(body))
+        .map_err(|e| TgCallError::JsonError(e.to_string()))
+        .and_then(|resp| resp.into_result().map_err(TgCallError::ApiError))
 }

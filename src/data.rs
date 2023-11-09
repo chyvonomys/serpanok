@@ -539,18 +539,33 @@ pub async fn rulya_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
     let bytes: Vec<u8> = fetch_url(log, RULYAURL.to_owned(), &[]).await?;
 
     if let Ok(document) = select::document::Document::from_read(bytes.as_slice()) {
-        if let Some(div2) = document.find(Class("col-md-3")).take(1).next() {
-            if let Some(center) = div2.find(Name("center")).take(1).next() {
-                let label = center.text();
+        if let Some(div2) = document.find(Class("col-lg-5")).take(1).next() {
+            if let Some(div) = div2.find(Name("div")).take(1).next() {
+                if let Some(center) = div.find(Name("center")).take(1).next() {
+                    let label = center.text();
 
-                let rates: Vec<f32> = div2.find(Class("tbl"))
-                    .take(4)
-                    .filter_map(|e| e.text().parse().ok())
-                    .collect();
+                    let rates: Vec<Vec<f32>> = div.find(Name("tr"))
+                        .skip(1)
+                        .take(2)
+                        .map(|tr| {
+                            let buy_sell: Vec<f32> = tr.find(Name("td"))
+                                .skip(2)
+                                .take(2)
+                                .filter_map(|td| {
+                                    td.find(Name("h3"))
+                                        .take(1)
+                                        .next()
+                                        .and_then(|h3| h3.text().parse().ok())
+                                })
+                                .collect();
+                            buy_sell
+                        })
+                        .collect();
 
-                if rates.len() == 4 {
-                    let rates = Rates{label, usd_buy: rates[0], usd_sell: rates[1], eur_buy: rates[2], eur_sell: rates[3]};
-                    return Ok(rates);
+                    if rates.len() == 2 && rates[0].len() == 2 && rates[1].len() == 2 {
+                        let rates = Rates{label, usd_buy: rates[0][0], usd_sell: rates[0][1], eur_buy: rates[1][0], eur_sell: rates[1][1]};
+                        return Ok(rates);
+                    }
                 }
             }
         }
@@ -558,34 +573,43 @@ pub async fn rulya_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
     Err("could not parse rulya page".to_owned())
 }
 
-pub async fn piramida_fetch_rates(log: Arc<TaggedLog>) -> Result<Rates, String> {
-    Err("not implemeted piramida".to_owned())
-}
-
 async fn poll_exchange_rate_impl(
     secs: u64, log: Arc<TaggedLog>,
 ) -> Result<std::convert::Infallible, String> {
 
-    let conn = rusqlite::Connection::open("exchange.db")
-        .map_err(|e| e.to_string())?;
-
-    let _c = conn.execute(
-        "CREATE TABLE IF NOT EXISTS rulya_usd(\
-time TEXT NOT NULL PRIMARY KEY,\
-buy FLOAT NOT NULL,\
-sell FLOAT NOT NULL)",
-        rusqlite::NO_PARAMS,
-    )
-        .map_err(|e| e.to_string())?;
+    let conn = || -> rusqlite::Result<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open("exchange.db")?;
+        for provider in &["rulya"] {
+            for currency in &["usd", "eur"] {
+                let _c_usd = conn.execute(
+                    &format!(
+                        "CREATE TABLE IF NOT EXISTS {}_{}(\
+                         time TEXT NOT NULL PRIMARY KEY,\
+                         buy FLOAT NOT NULL,\
+                         sell FLOAT NOT NULL)",
+                        provider, currency
+                    ),
+                    rusqlite::NO_PARAMS,
+                )?;
+            }
+        }
+        Ok(conn)
+    }().map_err(|e| e.to_string())?;
 
     loop {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let rulya = rulya_fetch_rates(log.clone()).await?;
-        let _i = conn.execute(
-            "INSERT INTO rulya_usd(time, buy, sell) VALUES(?1, ?2, ?3)",
-            &[now, rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
-        )
-            .map_err(|e| e.to_string())?;
+        let () = || -> rusqlite::Result<()> {
+            let _iru = conn.execute(
+                "INSERT INTO rulya_usd(time, buy, sell) VALUES(?1, ?2, ?3)",
+                &[now.clone(), rulya.usd_buy.to_string(), rulya.usd_sell.to_string()],
+            )?;
+            let _ire = conn.execute(
+                "INSERT INTO rulya_eur(time, buy, sell) VALUES(?1, ?2, ?3)",
+                &[now, rulya.eur_buy.to_string(), rulya.eur_sell.to_string()],
+            )?;
+            Ok(())
+        }().map_err(|e| e.to_string())?;
         let _x = tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     }
 }

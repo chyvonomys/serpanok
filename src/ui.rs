@@ -274,7 +274,7 @@ pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ym
     use itertools::Itertools; // group_by, merge_join_by
     use std::convert::TryInto;
 
-    let start0 = start.date().and_hms(start.hour(), 0, 0);
+    let start0 = start.date_naive().and_hms_opt(start.hour(), 0, 0).unwrap();
 
     (1..120)
         .map(|dh| start0.clone() + chrono::Duration::hours(dh))
@@ -282,7 +282,7 @@ pub fn time_picker<TZ: chrono::TimeZone>(start: chrono::DateTime<TZ>) -> Vec<(Ym
         .into_iter()
         .map(|(ymd, ts)| {
             let hs = ts
-                .map(|t| (t.hour().try_into().unwrap(), chrono::DateTime::<chrono::Utc>::from_utc(t.naive_utc(), chrono::Utc)))
+                .map(|t| (t.hour().try_into().unwrap(), chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(t, chrono::Utc)))
                 .group_by(|p| p.0 / 6)
                 .into_iter()
                 .map(|(_row, xs)| {
@@ -690,7 +690,7 @@ async fn process_graph_widget(chat_id: i64, source: ExchangeSource) -> Result<()
 
     let log = Arc::new(TaggedLog {tag: format!("{}:.", chat_id)});
     let rates = source.fetch_rates(log).await?;
-    let text = format!("{}:\nUSD: {}/{}\nEUR: {}/{}", rates.label,
+    let text = format!("{}:\nUSD: {:.2}/{:.2}\nEUR: {:.2}/{:.2}", rates.label,
                        rates.usd_buy, rates.usd_sell,
                        rates.eur_buy, rates.eur_sell,
     );
@@ -713,8 +713,14 @@ async fn process_graph_widget(chat_id: i64, source: ExchangeSource) -> Result<()
     Ok( () )
 }
 
-pub fn process_update(tgu: telegram::TgUpdate) -> impl Future<Output=Result<(), String>> {
-    process_bot(SeUpdate::from(tgu))
+#[derive(Clone, Copy)]
+pub struct Features {
+    pub weather: bool,
+    pub rulya: bool,
+}
+
+pub fn process_update(tgu: telegram::TgUpdate, fs: Features) -> impl Future<Output=Result<(), String>> {
+    process_bot(SeUpdate::from(tgu), fs)
 }
 
 static ANDRIY: i64 = 54_462_285;
@@ -727,7 +733,7 @@ static USAGE_MSG: &str = "\u{1F4A1} цей бот вміє відстежува�
 \u{1F5FA} *по назві місця*\n\
 `     `(ввести `@osmbot <назва>` і вибрати з списку)";
 static WRONG_LOCATION_MSG: &str = "невірні координати місця";
-static UNKNOWN_COMMAND_MSG: &str = "я розумію лише команду /start";
+static UNKNOWN_COMMAND_MSG: &str = "невідома команда";
 static CBQ_ERROR_MSG: &str = "помилка";
 static PADDING_BTN_MSG: &str = "недоcтупна опція";
 
@@ -738,18 +744,17 @@ static PADDING_BTN_MSG: &str = "недоcтупна опція";
 // TODO2:  what if user blocks bot?
 
 // NOTE: allow only private chat communication for now
-async fn process_bot(upd: SeUpdate) -> Result<(), String> {
+async fn process_bot(upd: SeUpdate, fs: Features) -> Result<(), String> {
     match upd {
         SeUpdate::PrivateChat {chat_id, update, ..} => match update {
             SeUpdateVariant::Command(cmd) =>
                 match cmd.as_str() {
-                    "/start" => tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ()).await,
-                    "/debug" => process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned())).await,
-                    "/rulya" => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
-                    "/piramida" => process_graph_widget(chat_id, ExchangeSource::Piramida).await,
+                    "/start" if fs.weather => tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_| ()).await,
+                    "/debug" if fs.weather => process_widget(chat_id, 50.62, 26.25, DataSource::IconEu, Some("debug-rv".to_owned())).await,
+                    "/rulya" if fs.rulya => process_graph_widget(chat_id, ExchangeSource::Rulya).await,
                     _ => tg_send_widget(chat_id, TgText::Plain(UNKNOWN_COMMAND_MSG.to_owned()), None, None).map_ok(|_| ()).await,
                 },
-            SeUpdateVariant::Place {latitude, longitude, name, ..} =>
+            SeUpdateVariant::Place {latitude, longitude, name, ..} if fs.weather =>
                 if let Some(source) = DataSource::from_latlon(latitude, longitude) {
                     process_widget(chat_id, latitude, longitude, source, name).await
                 } else {
@@ -758,7 +763,7 @@ async fn process_bot(upd: SeUpdate) -> Result<(), String> {
             SeUpdateVariant::CBQ {id, msg_id, data} =>
                 if data == PADDING_DATA { // TODO: this is wrong place to check this
                     tg_answer_cbq(id, Some(PADDING_BTN_MSG.to_owned()))
-                             .map_err(|e| format!("answer stub cbq error: {}", e)).await
+                        .map_err(|e| format!("answer stub cbq error: {}", e)).await
                 } else {
                     // push choice into channel for (chat, msg_id) conversation
                     let ok = UserClick::click(chat_id, msg_id, data)
@@ -766,9 +771,9 @@ async fn process_bot(upd: SeUpdate) -> Result<(), String> {
                         .is_ok();
 
                     tg_answer_cbq(id, if ok { None } else { Some(CBQ_ERROR_MSG.to_owned()) })
-                             .map_err(|e| format!("answer cbq error: {}", e)).await
+                        .map_err(|e| format!("answer cbq error: {}", e)).await
                 },
-            SeUpdateVariant::Text(text) => {
+            SeUpdateVariant::Text(text) if fs.weather => {
                 let ok = UserInput::input(chat_id, text)
                     .map_err(|e| println!("text {} error: {}", chat_id, e))
                     .is_ok();
@@ -779,6 +784,7 @@ async fn process_bot(upd: SeUpdate) -> Result<(), String> {
                     tg_send_widget(chat_id, TgText::Markdown(USAGE_MSG.to_owned()), None, None).map_ok(|_m| () ).await
                 }
             },
+            update => tg_send_widget(ANDRIY, TgText::Plain(format!("disabled update:\n{:#?}", update)), None, None).map_ok(|_| ()).await,
         },            
         SeUpdate::Other(update) =>
             tg_send_widget(ANDRIY, TgText::Plain(format!("unsupported update:\n{:#?}", update)), None, None).map_ok(|_| ()).await,

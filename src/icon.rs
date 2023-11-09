@@ -61,7 +61,7 @@ impl IconFile {
 
         let paramstr = param.to_abbrev();
         let yyyymmdd = format!("{}{:02}{:02}", yyyy, mm, dd);
-        let modelrun_time = chrono::Utc.ymd(yyyy.into(), mm.into(), dd.into()).and_hms(modelrun.into(), 0, 0);
+        let modelrun_time = chrono::Utc.with_ymd_and_hms(yyyy.into(), mm.into(), dd.into(), modelrun.into(), 0, 0).unwrap();
 
         Self {        
             prefix: format!("https://opendata.dwd.de/weather/nwp/icon-eu/grib/{:02}/{}/", modelrun, paramstr.to_lowercase()),
